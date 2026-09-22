@@ -1,65 +1,62 @@
+mod config;
+mod counter;
+mod foundry;
+mod image;
+mod relay;
+mod sheet;
+
+use config::{Config, apply_env_fallback};
+use openaction::global_events::*;
 use openaction::*;
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct CounterSettings {
-	step: isize,
-	value: isize,
-	label: String,
+struct Handler {
+	config: Arc<RwLock<Config>>,
+	relay: Arc<relay::Relay>,
+	sheet: sheet::Sheet,
 }
-
-impl Default for CounterSettings {
-	fn default() -> Self {
-		Self {
-			step: 1,
-			value: 0,
-			label: String::new(),
-		}
-	}
-}
-
-fn render_title(settings: &CounterSettings) -> String {
-	let label = settings.label.trim();
-	if label.is_empty() {
-		settings.value.to_string()
-	} else {
-		format!("{}\n{}", label, settings.value)
-	}
-}
-
-async fn refresh_title(instance: &Instance, settings: &CounterSettings) -> OpenActionResult<()> {
-	instance.set_title(Some(render_title(settings)), None).await
-}
-
-struct Counter;
 
 #[async_trait]
-impl Action for Counter {
-	const UUID: ActionUuid = "us.elbert.foundryvtt.counter";
-	type Settings = CounterSettings;
-
-	async fn will_appear(
-		&self,
-		instance: &Instance,
-		settings: &Self::Settings,
-	) -> OpenActionResult<()> {
-		refresh_title(instance, settings).await
+impl GlobalEventHandler for Handler {
+	async fn plugin_ready(&self) -> OpenActionResult<()> {
+		get_global_settings().await
 	}
 
-	async fn did_receive_settings(
+	async fn did_receive_global_settings(
 		&self,
-		instance: &Instance,
-		settings: &Self::Settings,
+		event: DidReceiveGlobalSettingsEvent,
 	) -> OpenActionResult<()> {
-		refresh_title(instance, settings).await
+		let incoming: Config =
+			serde_json::from_value(serde_json::to_value(event.payload.settings)?)
+				.unwrap_or_default();
+		let merged = apply_env_fallback(incoming);
+
+		let (reconnect, repaint) = {
+			let mut guard = self.config.write().await;
+			let reconnect = guard.connection_differs(&merged);
+			let repaint = guard.appearance_differs(&merged);
+			*guard = merged;
+			(reconnect, repaint)
+		};
+
+		log::debug!("global settings applied: {:?}", self.config.read().await);
+
+		if reconnect {
+			self.relay.config_changed.notify_waiters();
+		}
+		if repaint {
+			self.sheet.state.clear_art().await;
+		}
+		self.sheet.state.poll_wake.notify_waiters();
+		sheet::push_connection_state_to_all(&self.sheet).await;
+		Ok(())
 	}
 
-	async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-		let mut next = settings.clone();
-		next.value += next.step;
-		instance.set_settings(&next).await?;
-		refresh_title(instance, &next).await
+	async fn system_did_wake_up(&self, _event: SystemDidWakeUpEvent) -> OpenActionResult<()> {
+		log::info!("system woke up; forcing relay reconnect");
+		self.relay.config_changed.notify_waiters();
+		Ok(())
 	}
 }
 
@@ -74,7 +71,39 @@ async fn main() {
 		eprintln!("failed to initialise logger: {error}");
 	}
 
-	register_action(Counter).await;
+	let config = Arc::new(RwLock::new(apply_env_fallback(Config::default())));
+	let relay = Arc::new(relay::Relay::new(config.clone()));
+	let state = Arc::new(sheet::SheetState::default());
+	let sheet = sheet::Sheet {
+		relay: relay.clone(),
+		config: config.clone(),
+		state: state.clone(),
+	};
+
+	set_global_event_handler(Box::leak(Box::new(Handler {
+		config: config.clone(),
+		relay: relay.clone(),
+		sheet: sheet.clone(),
+	})));
+
+	tokio::spawn(relay.clone().run_forever());
+	tokio::spawn(sheet::poll_loop(sheet.clone()));
+
+	{
+		let sheet = sheet.clone();
+		let relay = relay.clone();
+		tokio::spawn(async move {
+			loop {
+				relay.session_started.notified().await;
+				sheet.state.clear_art().await;
+				sheet::probe_notify_setting(sheet.clone()).await;
+				sheet.repaint_visible().await;
+			}
+		});
+	}
+
+	register_action(counter::Counter).await;
+	register_action(sheet.clone()).await;
 
 	if let Err(error) = run(std::env::args().collect()).await {
 		log::error!("plugin exited: {error}");

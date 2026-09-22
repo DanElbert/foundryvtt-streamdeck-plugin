@@ -2,7 +2,7 @@
 	"Name": "Foundry VTT",
 	"Description": "Stream Deck actions for Foundry VTT.",
 	"Author": "Dan Elbert",
-	"Version": "0.1.0",
+	"Version": "0.2.0",
 	"Icon": "icon",
 	"Category": "Foundry VTT",
 	"CategoryIcon": "icon",
@@ -11,16 +11,44 @@
 		"x86_64-unknown-linux-gnu": "x86_64-unknown-linux-gnu/bin/foundryvtt-streamdeck-plugin"
 	},
 	"CodePathLin": "x86_64-unknown-linux-gnu/bin/foundryvtt-streamdeck-plugin",
-	"OS": [{ "Platform": "linux" }],
+	"OS": [
+		{
+			"Platform": "linux"
+		}
+	],
 	"Actions": [
 		{
 			"UUID": "us.elbert.foundryvtt.counter",
 			"Name": "Counter",
 			"Tooltip": "Increment a counter by a configurable step",
 			"Icon": "icon",
-			"Controllers": ["Keypad"],
+			"Controllers": [
+				"Keypad"
+			],
 			"SupportedInMultiActions": true,
-			"States": [{ "Image": "actionDefaultImage", "Title": "0" }]
+			"States": [
+				{
+					"Image": "actionDefaultImage",
+					"Title": "0"
+				}
+			]
+		},
+		{
+			"UUID": "us.elbert.foundryvtt.sheet",
+			"Name": "Actor Sheet",
+			"Tooltip": "Toggle an actor's character sheet and show its token art",
+			"Icon": "sheet",
+			"PropertyInspectorPath": "pi-sheet.html",
+			"Controllers": [
+				"Keypad"
+			],
+			"SupportedInMultiActions": true,
+			"States": [
+				{
+					"Image": "actionDefaultImage",
+					"TitleAlignment": "bottom"
+				}
+			]
 		}
 	]
 }

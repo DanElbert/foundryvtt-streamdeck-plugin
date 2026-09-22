@@ -1,5 +1,6 @@
 /target
 /dist
+.relay.local
 sync.sh
 *.swp
 .DS_Store
