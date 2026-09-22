@@ -1,0 +1,26 @@
+{
+	"Name": "Foundry VTT",
+	"Description": "Stream Deck actions for Foundry VTT.",
+	"Author": "Dan Elbert",
+	"Version": "0.1.0",
+	"Icon": "icon",
+	"Category": "Foundry VTT",
+	"CategoryIcon": "icon",
+	"PropertyInspectorPath": "pi.html",
+	"CodePaths": {
+		"x86_64-unknown-linux-gnu": "x86_64-unknown-linux-gnu/bin/foundryvtt-streamdeck-plugin"
+	},
+	"CodePathLin": "x86_64-unknown-linux-gnu/bin/foundryvtt-streamdeck-plugin",
+	"OS": [{ "Platform": "linux" }],
+	"Actions": [
+		{
+			"UUID": "us.elbert.foundryvtt.counter",
+			"Name": "Counter",
+			"Tooltip": "Increment a counter by a configurable step",
+			"Icon": "icon",
+			"Controllers": ["Keypad"],
+			"SupportedInMultiActions": true,
+			"States": [{ "Image": "actionDefaultImage", "Title": "0" }]
+		}
+	]
+}

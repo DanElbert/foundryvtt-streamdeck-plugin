@@ -1,0 +1,5 @@
+/target
+/dist
+sync.sh
+*.swp
+.DS_Store

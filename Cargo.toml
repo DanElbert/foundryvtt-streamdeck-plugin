@@ -1,0 +1,15 @@
+[package]
+name = "foundryvtt-streamdeck-plugin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+openaction = "2.7"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.47", features = ["rt-multi-thread", "macros"] }
+log = "0.4"
+simplelog = "0.12"
+
+[profile.release]
+strip = true

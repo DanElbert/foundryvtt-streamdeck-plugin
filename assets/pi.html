@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<style>
+			body {
+				margin: 0;
+				padding: 12px;
+				font: 13px/1.4 system-ui, sans-serif;
+				color: #d8d8d8;
+				background: #2d2d2d;
+			}
+			label {
+				display: block;
+				margin-bottom: 4px;
+				color: #969696;
+			}
+			input {
+				width: 100%;
+				box-sizing: border-box;
+				padding: 5px 6px;
+				color: #d8d8d8;
+				background: #3d3d3d;
+				border: 1px solid #555;
+				border-radius: 3px;
+			}
+			.field + .field {
+				margin-top: 12px;
+			}
+		</style>
+	</head>
+
+	<body>
+		<div class="field">
+			<label for="label">Label</label>
+			<input id="label" type="text" placeholder="(none)" />
+		</div>
+		<div class="field">
+			<label for="step">Step</label>
+			<input id="step" type="number" step="1" />
+		</div>
+
+		<script>
+			function connectOpenActionSocket(inPort, inPropertyInspectorUUID, inRegisterEvent, inInfo, inActionInfo) {
+				const websocket = new WebSocket("ws://localhost:" + inPort);
+				const actionInfo = JSON.parse(inActionInfo);
+				const context = actionInfo.context;
+				let settings = actionInfo.payload.settings ?? {};
+
+				const labelInput = document.getElementById("label");
+				const stepInput = document.getElementById("step");
+
+				const paint = () => {
+					if (document.activeElement !== labelInput) labelInput.value = settings.label ?? "";
+					if (document.activeElement !== stepInput) stepInput.value = settings.step ?? 1;
+				};
+
+				const commit = () => {
+					settings.label = labelInput.value;
+					settings.step = parseInt(stepInput.value, 10) || 1;
+					websocket.send(JSON.stringify({ event: "setSettings", context, payload: settings }));
+				};
+
+				let pending;
+				const debounced = () => {
+					clearTimeout(pending);
+					pending = setTimeout(commit, 250);
+				};
+
+				websocket.onopen = () => {
+					websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inPropertyInspectorUUID }));
+				};
+
+				websocket.onmessage = (event) => {
+					const data = JSON.parse(event.data);
+					if (data.event === "didReceiveSettings") {
+						settings = data.payload.settings ?? {};
+						paint();
+					}
+				};
+
+				labelInput.addEventListener("input", debounced);
+				stepInput.addEventListener("input", debounced);
+				labelInput.addEventListener("change", commit);
+				stepInput.addEventListener("change", commit);
+
+				paint();
+			}
+
+			const connectElgatoStreamDeckSocket = connectOpenActionSocket;
+		</script>
+	</body>
+</html>
