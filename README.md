@@ -3,16 +3,18 @@
 An [OpenAction](https://openaction.amankhanna.me/) plugin for stream controller devices, built with
 the `openaction` Rust crate. Runs under [OpenDeck](https://github.com/nekename/OpenDeck) or Tacto.
 
-Two actions: a **Counter** scaffold, and an **Actor Sheet** button that toggles a character sheet
-open and closed in Foundry and shows that actor's token artwork.
+Three actions: a **Counter** scaffold, an **Actor Sheet** button that toggles a character sheet
+open and closed in Foundry and shows that actor's token artwork, and a **Condition** button that
+shows and toggles a condition on the selected tokens.
 
 ## Requirements
 
 - Rust (stable)
 - OpenDeck
-- For the Actor Sheet action: a Foundry world running the
-  [REST API module](https://github.com/ThreeHats/foundryvtt-rest-api), paired with a relay, and a
-  relay API key
+- For the Actor Sheet and Condition actions: a Foundry world (dnd5e, for conditions) running the
+  [REST API module](https://github.com/ThreeHats/foundryvtt-rest-api), paired with a relay, a
+  relay API key, and the
+  [Stream Deck Companion module](https://github.com/DanElbert/foundryvtt-streamdeck-module)
 
 ## Build and install
 
@@ -53,18 +55,21 @@ Press to toggle the actor's character sheet open or closed in Foundry. The key s
 token art, with a coloured border while the sheet is open and a grey border when Foundry can't be
 reached.
 
-### Foundry setup, both required
+### Foundry setup
 
-In **Configure Settings → Module Settings → REST API**:
+Install and enable the **Stream Deck Companion** module (`foundryvtt-streamdeck`) in the world. Its
+manifest URL is:
+
+```
+https://raw.githubusercontent.com/DanElbert/foundryvtt-streamdeck-module/main/module.json
+```
+
+Then in **Configure Settings → Module Settings → REST API**:
 
 | Setting | Must be | Why |
 |---|---|---|
 | Allow Execute JavaScript | **on** | There is no sheet open/close endpoint; this is the only route. |
-| Notify on Execute JS | **off** | Otherwise every press and every poll whispers the GM in chat. |
-
-While *Notify on Execute JS* is left on, the plugin **disables its own state polling** rather than
-flood your chat log, and says so in its log. The button still works — it just won't notice sheets you
-open or close by hand in Foundry until you fix the setting.
+| Notify on Execute JS | **off** | Otherwise every press and artwork fetch whispers the GM in chat. |
 
 Note that enabling *Allow Execute JavaScript* lets anyone holding a valid relay key for that world
 run arbitrary JavaScript in your GM browser session. Use a dedicated key; revoking it is the kill
@@ -81,12 +86,38 @@ Token is the default.
 
 ### State sync
 
-The button knows a sheet's state immediately after *it* toggles one. For sheets you open or close
-directly in Foundry, it polls every 5 seconds (configurable; `0` turns polling off). One batched
-request covers every visible button, so the cost doesn't grow with the number of buttons.
+There is no polling. The companion module pushes an event over the relay whenever an actor sheet
+opens or closes in the GM's browser, and the matching buttons update immediately. When the plugin
+connects, and whenever the GM's browser reloads, the full set of open sheets is sent so the deck
+catches up.
 
-Push updates aren't possible today — the REST module's forwarded-hook list doesn't include sheet
-render/close events. A small companion module could fix that later.
+Without the companion module the button still toggles sheets, but it won't notice sheets opened or
+closed directly in Foundry. The plugin logs a warning and the property inspector shows
+"companion module missing".
+
+## The Condition action
+
+Each key is bound to one D&D 5e condition: blinded, charmed, deafened, frightened, grappled,
+incapacitated, invisible, paralyzed, petrified, poisoned, prone, restrained, stunned or unconscious.
+Exhaustion isn't offered. Pick the condition in the property inspector; the list comes from
+Foundry, so the relay must be connected and the companion module enabled.
+
+The key follows whichever tokens are selected in the GM's browser:
+
+| Key shows | When |
+|---|---|
+| Dimmed icon | The condition is on none of the selected tokens |
+| Bright icon, solid border | It is on every selected token |
+| Bright icon, dashed border | It is on some of them |
+| Very faint icon | Nothing is selected (pressing just flashes the alert) |
+| Grey border | Foundry can't be reached |
+
+Pressing adds the condition to every selected token that lacks it, or, if they all have it,
+removes it from all of them. The key updates once Foundry has applied the change.
+
+A condition implied by another one, such as *incapacitated* while a token is unconscious,
+paralyzed, petrified or stunned, shows as on, but pressing can't remove it. Remove the condition
+that causes it instead.
 
 ## Logs
 

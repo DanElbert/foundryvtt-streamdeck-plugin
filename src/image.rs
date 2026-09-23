@@ -2,6 +2,7 @@ use crate::foundry::ArtSource;
 
 use base64::Engine;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -21,20 +22,9 @@ pub struct ArtEntry {
 	pub open: String,
 	pub offline: String,
 	pub name: String,
-	fetched: Instant,
 }
 
 impl ArtEntry {
-	pub fn new(closed: String, open: String, offline: String, name: String) -> Self {
-		Self {
-			closed,
-			open,
-			offline,
-			name,
-			fetched: Instant::now(),
-		}
-	}
-
 	pub fn variant(&self, open: bool, online: bool) -> &str {
 		if !online {
 			&self.offline
@@ -46,24 +36,53 @@ impl ArtEntry {
 	}
 }
 
-#[derive(Default)]
-pub struct ArtCache {
-	entries: RwLock<HashMap<ArtKey, ArtEntry>>,
-	order: RwLock<Vec<ArtKey>>,
+pub type ArtCache = TtlCache<ArtKey, ArtEntry>;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ConditionKey {
+	pub id: String,
+	pub accent: String,
 }
 
-impl ArtCache {
-	pub async fn get(&self, key: &ArtKey) -> Option<ArtEntry> {
-		let entry = self.entries.read().await.get(key).cloned()?;
-		if entry.fetched.elapsed() > TTL {
+#[derive(Clone)]
+pub struct ConditionArt {
+	pub name: String,
+	pub off: String,
+	pub on: String,
+	pub mixed: String,
+	pub none: String,
+	pub offline: String,
+}
+
+pub struct TtlCache<K, V> {
+	entries: RwLock<HashMap<K, (V, Instant)>>,
+	order: RwLock<Vec<K>>,
+}
+
+impl<K, V> Default for TtlCache<K, V> {
+	fn default() -> Self {
+		Self {
+			entries: RwLock::new(HashMap::new()),
+			order: RwLock::new(Vec::new()),
+		}
+	}
+}
+
+impl<K: Clone + Eq + Hash, V: Clone> TtlCache<K, V> {
+	pub async fn get(&self, key: &K) -> Option<V> {
+		let (value, fetched) = self.entries.read().await.get(key).cloned()?;
+		if fetched.elapsed() > TTL {
 			self.remove(key).await;
 			return None;
 		}
-		Some(entry)
+		Some(value)
 	}
 
-	pub async fn insert(&self, key: ArtKey, entry: ArtEntry) {
-		self.entries.write().await.insert(key.clone(), entry);
+	pub async fn insert(&self, key: K, value: V) {
+		self.entries
+			.write()
+			.await
+			.insert(key.clone(), (value, Instant::now()));
 
 		let mut order = self.order.write().await;
 		order.retain(|k| k != &key);
@@ -75,7 +94,7 @@ impl ArtCache {
 		}
 	}
 
-	pub async fn remove(&self, key: &ArtKey) {
+	pub async fn remove(&self, key: &K) {
 		self.entries.write().await.remove(key);
 		self.order.write().await.retain(|k| k != key);
 	}

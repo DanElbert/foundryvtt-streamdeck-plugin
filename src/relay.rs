@@ -1,4 +1,5 @@
 use crate::config::{Config, redact};
+use crate::foundry::EVENT_HOOK;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -7,13 +8,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify, RwLock, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(8);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_INFLIGHT: usize = 64;
 const BACKOFF: [u64; 6] = [1, 2, 4, 8, 15, 30];
+const EVENT_CAPACITY: usize = 64;
 
 #[derive(Debug)]
 pub enum RelayError {
@@ -42,7 +44,10 @@ pub struct Relay {
 	config: Arc<RwLock<Config>>,
 	pub config_changed: Notify,
 	pub session_started: Notify,
+	pub session_ended: Notify,
+	pub events: broadcast::Sender<Value>,
 	resolved_client_id: RwLock<Option<String>>,
+	companion: RwLock<Option<String>>,
 	tx: Mutex<Option<mpsc::Sender<String>>>,
 	pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
 	inflight: Semaphore,
@@ -56,7 +61,10 @@ impl Relay {
 			config,
 			config_changed: Notify::new(),
 			session_started: Notify::new(),
+			session_ended: Notify::new(),
+			events: broadcast::channel(EVENT_CAPACITY).0,
 			resolved_client_id: RwLock::new(None),
+			companion: RwLock::new(None),
 			tx: Mutex::new(None),
 			pending: Mutex::new(HashMap::new()),
 			inflight: Semaphore::new(MAX_INFLIGHT),
@@ -71,6 +79,14 @@ impl Relay {
 
 	pub async fn resolved_client_id(&self) -> Option<String> {
 		self.resolved_client_id.read().await.clone()
+	}
+
+	pub async fn companion(&self) -> Option<String> {
+		self.companion.read().await.clone()
+	}
+
+	pub async fn set_companion(&self, version: Option<String>) {
+		*self.companion.write().await = version;
 	}
 
 	fn request_id(&self) -> String {
@@ -167,6 +183,13 @@ impl Relay {
 									}
 								}
 							}
+							if !value
+								.get("eventChannels")
+								.and_then(Value::as_array)
+								.is_some_and(|c| c.iter().any(|t| t.as_str() == Some("hooks")))
+							{
+								log::warn!("relay does not advertise the 'hooks' event channel");
+							}
 							break;
 						}
 						Some("error") => {
@@ -192,6 +215,16 @@ impl Relay {
 				None => return Err("stream ended during auth".to_string()),
 			}
 		}
+
+		let subscribe = json!({
+			"type": "subscribe",
+			"channel": "hooks",
+			"requestId": self.request_id(),
+		});
+		stream
+			.send(Message::Text(subscribe.to_string().into()))
+			.await
+			.map_err(|e| format!("send subscribe: {e}"))?;
 
 		let (tx, mut rx) = mpsc::channel::<String>(64);
 		*self.tx.lock().await = Some(tx);
@@ -231,6 +264,27 @@ impl Relay {
 			log::warn!("relay sent non-json frame");
 			return;
 		};
+		match value.get("type").and_then(Value::as_str) {
+			Some("hook-event") => {
+				if value.get("hook").and_then(Value::as_str) == Some(EVENT_HOOK) {
+					match value.pointer("/data/data/args/0") {
+						Some(payload) => {
+							let _ = self.events.send(payload.clone());
+						}
+						None => log::warn!("{EVENT_HOOK} event without a payload"),
+					}
+				}
+				return;
+			}
+			Some("subscribed") => {
+				log::debug!(
+					"relay subscribed to '{}'",
+					value.get("channel").and_then(Value::as_str).unwrap_or("?")
+				);
+				return;
+			}
+			_ => {}
+		}
 		let Some(id) = value.get("requestId").and_then(Value::as_str) else {
 			if value.get("type").and_then(Value::as_str) == Some("error") {
 				log::warn!(
@@ -252,11 +306,14 @@ impl Relay {
 	}
 
 	async fn teardown(&self) {
-		self.connected.store(false, Ordering::Relaxed);
+		let was_connected = self.connected.swap(false, Ordering::Relaxed);
 		*self.tx.lock().await = None;
 		let drained: Vec<_> = self.pending.lock().await.drain().collect();
 		if !drained.is_empty() {
 			log::debug!("relay dropped {} in-flight request(s)", drained.len());
+		}
+		if was_connected {
+			self.session_ended.notify_waiters();
 		}
 	}
 

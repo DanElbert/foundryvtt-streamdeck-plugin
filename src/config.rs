@@ -16,7 +16,6 @@ pub struct Config {
 	pub relay_url: String,
 	pub api_key: String,
 	pub client_id: String,
-	pub poll_ms: u64,
 	pub indicator: Indicator,
 	pub border_color: String,
 }
@@ -27,7 +26,6 @@ impl Default for Config {
 			relay_url: String::new(),
 			api_key: String::new(),
 			client_id: String::new(),
-			poll_ms: 5000,
 			indicator: Indicator::Border,
 			border_color: "#ff6400".to_string(),
 		}
@@ -75,7 +73,6 @@ impl std::fmt::Debug for Config {
 			.field("relay_url", &self.relay_url)
 			.field("api_key", &redact(&self.api_key))
 			.field("client_id", &self.client_id)
-			.field("poll_ms", &self.poll_ms)
 			.field("border_color", &self.border_color)
 			.finish()
 	}
@@ -124,9 +121,6 @@ pub fn apply_env_fallback(mut config: Config) -> Config {
 		&& let Some(v) = env("FOUNDRY_RELAY_CLIENT_ID")
 	{
 		config.client_id = v;
-	}
-	if let Some(v) = env("FOUNDRY_RELAY_POLL_MS").and_then(|v| v.trim().parse::<u64>().ok()) {
-		config.poll_ms = v;
 	}
 	config
 }

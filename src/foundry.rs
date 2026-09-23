@@ -44,33 +44,55 @@ try {{
 	)
 }
 
-pub fn poll_script(uuids: &[String]) -> String {
-	let list = serde_json::to_string(uuids).unwrap_or_else(|_| "[]".to_string());
+pub const COMPANION_ID: &str = "foundryvtt-streamdeck";
+pub const EVENT_HOOK: &str = "foundryvtt-streamdeck.event";
+
+pub fn sync_script() -> String {
 	format!(
 		r#"
-const out = {{}};
-for (const u of {list}) {{
-  try {{
-    const a = await fromUuid(u);
-    out[u] = a ? !!(a._sheet && a._sheet.rendered) : null;
-  }} catch (e) {{
-    out[u] = null;
-  }}
-}}
-return out;
-"#
+let notify = null;
+try {{
+  notify = !!game.settings.get("foundry-rest-api", "notifyOnExecuteJs");
+}} catch (e) {{}}
+const m = game.modules.get({id});
+if (!m || !m.active || !m.api) return {{ module: null, notify, open: null, selection: null }};
+const snap = m.api.snapshot();
+return {{ module: snap.version, notify, open: snap.open, selection: snap.selection }};
+"#,
+		id = js(COMPANION_ID)
 	)
 }
 
-pub fn notify_probe_script() -> String {
-	r#"
-try {
-  return { notify: !!game.settings.get("foundry-rest-api", "notifyOnExecuteJs") };
-} catch (e) {
-  return { notify: null };
+fn companion_call(call: &str) -> String {
+	format!(
+		r#"
+const m = game.modules.get({id});
+if (!m || !m.active || !m.api) return {{ error: "companion module missing" }};
+try {{
+  return await m.api.{call};
+}} catch (e) {{
+  return {{ error: String((e && e.message) || e) }};
+}}
+"#,
+		id = js(COMPANION_ID)
+	)
 }
-"#
-	.to_string()
+
+pub fn conditions_script() -> String {
+	companion_call("conditions()")
+}
+
+pub fn toggle_condition_script(id: &str) -> String {
+	companion_call(&format!("toggleCondition({})", js(id)))
+}
+
+pub fn condition_art_script(id: &str, accent: &str, offline: &str) -> String {
+	companion_call(&format!(
+		"conditionArt({}, {{ accent: {}, offline: {} }})",
+		js(id),
+		js(accent),
+		js(offline)
+	))
 }
 
 pub fn art_script(uuid: &str, source: ArtSource, open_color: &str, offline_color: &str) -> String {

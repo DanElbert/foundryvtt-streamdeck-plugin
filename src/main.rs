@@ -1,5 +1,8 @@
+mod condition;
 mod config;
+mod connection;
 mod counter;
+mod events;
 mod foundry;
 mod image;
 mod relay;
@@ -15,6 +18,7 @@ struct Handler {
 	config: Arc<RwLock<Config>>,
 	relay: Arc<relay::Relay>,
 	sheet: sheet::Sheet,
+	condition: condition::Condition,
 }
 
 #[async_trait]
@@ -47,9 +51,11 @@ impl GlobalEventHandler for Handler {
 		}
 		if repaint {
 			self.sheet.state.clear_art().await;
+			self.condition.state.clear_art().await;
+			self.sheet.repaint_visible().await;
+			self.condition.repaint_visible().await;
 		}
-		self.sheet.state.poll_wake.notify_waiters();
-		sheet::push_connection_state_to_all(&self.sheet).await;
+		events::push_connection_state_to_all(&self.sheet, &self.condition).await;
 		Ok(())
 	}
 
@@ -79,31 +85,54 @@ async fn main() {
 		config: config.clone(),
 		state: state.clone(),
 	};
+	let condition = condition::Condition {
+		relay: relay.clone(),
+		config: config.clone(),
+		state: Arc::new(condition::ConditionState::default()),
+	};
 
 	set_global_event_handler(Box::leak(Box::new(Handler {
 		config: config.clone(),
 		relay: relay.clone(),
 		sheet: sheet.clone(),
+		condition: condition.clone(),
 	})));
 
 	tokio::spawn(relay.clone().run_forever());
-	tokio::spawn(sheet::poll_loop(sheet.clone()));
+	tokio::spawn(events::event_loop(sheet.clone(), condition.clone()));
 
 	{
 		let sheet = sheet.clone();
+		let condition = condition.clone();
 		let relay = relay.clone();
 		tokio::spawn(async move {
 			loop {
 				relay.session_started.notified().await;
 				sheet.state.clear_art().await;
-				sheet::probe_notify_setting(sheet.clone()).await;
+				events::resync(sheet.clone(), condition.clone()).await;
 				sheet.repaint_visible().await;
+				condition.repaint_visible().await;
+			}
+		});
+	}
+
+	{
+		let sheet = sheet.clone();
+		let condition = condition.clone();
+		let relay = relay.clone();
+		tokio::spawn(async move {
+			loop {
+				relay.session_ended.notified().await;
+				sheet.repaint_visible().await;
+				condition.repaint_visible().await;
+				events::push_connection_state_to_all(&sheet, &condition).await;
 			}
 		});
 	}
 
 	register_action(counter::Counter).await;
 	register_action(sheet.clone()).await;
+	register_action(condition.clone()).await;
 
 	if let Err(error) = run(std::env::args().collect()).await {
 		log::error!("plugin exited: {error}");

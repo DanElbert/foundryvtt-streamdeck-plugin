@@ -88,8 +88,8 @@
 
 	<body>
 		<div class="field">
-			<label for="actor">Actor</label>
-			<select id="actor">
+			<label for="condition">Condition</label>
+			<select id="condition">
 				<option value="">(none)</option>
 			</select>
 			<div class="row">
@@ -97,25 +97,15 @@
 				<button id="refresh" type="button">Refresh art</button>
 				<span id="status"></span>
 			</div>
-		</div>
-
-		<div class="field">
-			<label for="uuid">Actor UUID (manual)</label>
-			<input id="uuid" type="text" placeholder="Actor.xxxxxxxxxxxx" />
-		</div>
-
-		<div class="field">
-			<label for="art">Artwork</label>
-			<select id="art">
-				<option value="token">Token</option>
-				<option value="portrait">Portrait</option>
-				<option value="preferred">System preferred</option>
-			</select>
+			<p class="hint">
+				Shows the condition on the tokens selected in the GM's browser. Pressing adds it to every
+				selected token, or removes it if they all have it.
+			</p>
 		</div>
 
 		<div class="field inline">
 			<input id="showTitle" type="checkbox" />
-			<label for="showTitle" style="margin: 0">Show actor name</label>
+			<label for="showTitle" style="margin: 0">Show condition name</label>
 		</div>
 
 		<details>
@@ -137,14 +127,6 @@
 				Install and enable the Stream Deck Companion module (foundryvtt-streamdeck) in the
 				world, and turn OFF "Notify on Execute JS" in the Foundry REST API module settings.
 			</p>
-			<div class="field">
-				<label for="indicator">Open indicator</label>
-				<select id="indicator">
-					<option value="border">Coloured border</option>
-					<option value="svg">Border via SVG overlay</option>
-					<option value="title">Title marker</option>
-				</select>
-			</div>
 			<div class="field">
 				<label for="borderColor">Border colour</label>
 				<input id="borderColor" type="color" />
@@ -169,34 +151,26 @@
 					websocket.send(JSON.stringify({ event: "sendToPlugin", context, action, payload }));
 
 				const paint = () => {
-					if (idle(el("actor"))) el("actor").value = settings.actorUuid ?? "";
-					if (idle(el("uuid"))) el("uuid").value = settings.actorUuid ?? "";
-					if (idle(el("art"))) el("art").value = settings.artSource ?? "token";
+					if (idle(el("condition"))) el("condition").value = settings.statusId ?? "";
 					if (idle(el("showTitle"))) el("showTitle").checked = settings.showTitle !== false;
 				};
 
 				const commit = () => {
-					settings.artSource = el("art").value;
 					settings.showTitle = el("showTitle").checked;
 					websocket.send(JSON.stringify({ event: "setSettings", context, payload: settings }));
 				};
 
-				const pickActor = (uuid, name) => {
-					settings.actorUuid = (uuid ?? "").trim();
-					if (name !== undefined) settings.actorName = name ?? "";
+				const pickCondition = () => {
+					const sel = el("condition");
+					settings.statusId = sel.value;
+					settings.statusName = sel.value ? (sel.selectedOptions[0]?.dataset.name ?? "") : "";
 					commit();
-				};
-
-				let pending;
-				const debounce = (fn) => {
-					clearTimeout(pending);
-					pending = setTimeout(fn, 250);
 				};
 
 				websocket.onopen = () => {
 					websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inPropertyInspectorUUID }));
 					toPlugin({ event: "getConnection" });
-					toPlugin({ event: "getActors" });
+					toPlugin({ event: "getConditions" });
 				};
 
 				websocket.onmessage = (event) => {
@@ -210,20 +184,26 @@
 					if (data.event !== "sendToPropertyInspector") return;
 					const p = data.payload ?? {};
 
-					if (p.event === "actors") {
-						const sel = el("actor");
+					if (p.event === "conditions") {
+						const sel = el("condition");
 						sel.innerHTML = "";
 						sel.appendChild(new Option("(none)", ""));
-						const list = p.actors ?? [];
+						const list = p.conditions ?? [];
 						if (p.status === "ok") {
-							for (const a of list) sel.appendChild(new Option(a.name, a.uuid));
-							el("status").textContent = list.length + " actors";
+							for (const c of list) {
+								const opt = new Option(c.name, c.id);
+								opt.dataset.name = c.name;
+								sel.appendChild(opt);
+							}
+							el("status").textContent = list.length ? list.length + " conditions" : "no conditions (not dnd5e?)";
 						} else {
 							el("status").textContent = p.message || "unavailable";
 						}
-						if (settings.actorUuid && !list.some((a) => a.uuid === settings.actorUuid)) {
-							const label = (settings.actorName || settings.actorUuid) + " (saved)";
-							sel.appendChild(new Option(label, settings.actorUuid));
+						if (settings.statusId && !list.some((c) => c.id === settings.statusId)) {
+							const label = (settings.statusName || settings.statusId) + " (saved)";
+							const opt = new Option(label, settings.statusId);
+							opt.dataset.name = settings.statusName || settings.statusId;
+							sel.appendChild(opt);
 						}
 						paint();
 					}
@@ -231,7 +211,6 @@
 					if (p.event === "connection") {
 						if (idle(el("relayUrl"))) el("relayUrl").value = p.relayUrl ?? "";
 						if (idle(el("clientId"))) el("clientId").value = p.clientId ?? "";
-						if (idle(el("indicator"))) el("indicator").value = p.indicator ?? "border";
 						if (idle(el("borderColor"))) el("borderColor").value = p.borderColor ?? "#ff6400";
 						el("apiKey").placeholder = p.hasApiKey ? "(unchanged)" : "(required)";
 						el("resolved").textContent = p.resolvedClientId
@@ -245,14 +224,9 @@
 					}
 				};
 
-				el("actor").addEventListener("change", () =>
-					pickActor(el("actor").value, el("actor").selectedOptions[0]?.textContent),
-				);
-				el("uuid").addEventListener("input", () => debounce(() => pickActor(el("uuid").value)));
-				el("uuid").addEventListener("change", () => pickActor(el("uuid").value));
-				el("art").addEventListener("change", commit);
+				el("condition").addEventListener("change", pickCondition);
 				el("showTitle").addEventListener("change", commit);
-				el("reload").addEventListener("click", () => toPlugin({ event: "getActors" }));
+				el("reload").addEventListener("click", () => toPlugin({ event: "getConditions" }));
 				el("refresh").addEventListener("click", () => toPlugin({ event: "refreshArt" }));
 				el("saveConn").addEventListener("click", () =>
 					toPlugin({
@@ -260,7 +234,6 @@
 						relayUrl: el("relayUrl").value.trim(),
 						clientId: el("clientId").value.trim(),
 						apiKey: el("apiKey").value,
-						indicator: el("indicator").value,
 						borderColor: el("borderColor").value,
 					}),
 				);

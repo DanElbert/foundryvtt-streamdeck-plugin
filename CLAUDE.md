@@ -10,13 +10,16 @@ scaffold: one Counter action plus a minimal property inspector. No Foundry integ
 
 | Path | Notes |
 |---|---|
-| `src/main.rs` | Wiring only: logger, config, relay + poller spawn, `set_global_event_handler`, `register_action`, `run`. |
+| `src/main.rs` | Wiring only: logger, config, relay + companion-event loop spawn, session start/end repaint tasks, `set_global_event_handler`, `register_action`, `run`. |
 | `src/config.rs` | `Config`, env fallback, redaction. Hand-written `Debug` — never derive it, it holds the API key. |
 | `src/relay.rs` | Relay WebSocket client: auth, reconnect, request correlation. |
 | `src/foundry.rs` | The `execute-js` script builders. Kept separate so they can be reviewed, and pasted into a Foundry console, without digging through handler logic. |
-| `src/image.rs` | Art cache (TTL 10 min, LRU 32) and the SVG-wrapper fallback. |
+| `src/image.rs` | Generic `TtlCache` (TTL 10 min, LRU 32), token-art and condition-art entry types, and the SVG-wrapper fallback. |
 | `src/counter.rs` | Scaffold action. |
-| `src/sheet.rs` | Sheet-toggle action, instance mirror, poll loop. |
+| `src/sheet.rs` | Sheet-toggle action and its instance mirror. |
+| `src/condition.rs` | Condition-toggle action, its instance mirror, current token selection. |
+| `src/events.rs` | Companion event loop (dispatches to both actions) and the per-session resync. |
+| `src/connection.rs` | Connection state pushed to, and `setConnection` from, both actions' PIs. Global config, so one implementation. |
 | `assets/` | **Staging directory, not an installed path.** See below. |
 | `build.sh` | `cargo build` + assemble `dist/<uuid>.sdPlugin/` for hand-copying. |
 | `dist/` | Build output, gitignored. |
@@ -201,28 +204,49 @@ Not built yet, but these shape decisions already made:
 
 ## The sheet action
 
-### Prerequisites in Foundry, both mandatory
+### Prerequisites in Foundry
 
 `allowExecuteJs` must be **on** — there is no sheet open/close action anywhere in the relay or the
-REST module, so `execute-js` is the only route. `notifyOnExecuteJs` must be **off**, or every press
-and every poll whispers the GM.
+REST module, so `execute-js` is the only route for toggles and artwork. `notifyOnExecuteJs` should be
+**off**, or every press and art fetch whispers the GM; the resync logs a warning when it is on but
+disables nothing, since there is no longer a recurring call to protect against.
 
-The plugin **fails closed** on the second one: a one-shot probe runs on each relay session, and if
-notifications are on it logs an error and sets `poll_ms = 0` for that session. Buttons still track
-every change the deck itself causes (the toggle's return value is authoritative); only
-externally-caused changes drift. Refusing to spam beats spamming.
+The companion module `foundryvtt-streamdeck` (`../foundryvtt-streamdeck-module`) is **required** for
+externally-caused changes. There is no polling fallback: without it, state only changes on presses,
+art fetches and the per-session resync, and the resync logs a warning.
+
+### Sheet state is pushed, not polled
+
+The companion module emits `hook-event` frames with hook `foundryvtt-streamdeck.event` (`EVENT_HOOK`; it was
+`.sheet` before companion 0.2.0, and the old name is now ignored) through the REST
+module's own relay socket; see that module's `CLAUDE.md` for why the relay forwards a hook name it
+has never heard of. Here:
+
+- `relay.rs` sends `{"type":"subscribe","channel":"hooks"}` straight after auth, **before**
+  `session_started`, so no event can slip between subscribing and the resync.
+- `dispatch` routes only `hook == EVENT_HOOK` frames, unwrapping `data.data.args[0]`, onto a
+  `broadcast` channel. Everything else on `hooks` is the REST module's firehose of 33 built-in
+  hooks, which our subscription switches on as a side effect; it is dropped. WS subscribers cannot
+  filter server-side (the relay's `AddWSEventFunc` ignores `filters`).
+- Payloads are `{event:"sheet", uuid, open}` and `{event:"snapshot", open:[uuid...]}`. A snapshot is
+  the complete set: `apply_snapshot` **replaces** `open`, so anything absent is closed.
+- `resync` is the one `execute-js` per session: it reads `notifyOnExecuteJs`, whether the companion
+  is active (its version is shown in the PI), and `api.snapshot()`. It also runs if the broadcast
+  receiver lags.
+- A GM browser reload closes every sheet while *our* relay session stays up, so `resync` never
+  runs. The companion covers it by emitting a snapshot on `foundry-rest-api.relayConnected`.
 
 ### The instance mirror is not optional
 
-`Instance.settings_json` is `pub(crate)` in openaction, so a poller holding `Arc<Instance>` from
+`Instance.settings_json` is `pub(crate)` in openaction, so the event loop holding `Arc<Instance>` from
 `visible_instances()` **cannot read that instance's settings**. `sheet.rs` therefore keeps its own
 `InstanceId -> SheetSettings` map, maintained in `will_appear` / `did_receive_settings` /
-`will_disappear`. Removing it silently breaks polling.
+`will_disappear`. Removing it silently breaks `repaint_visible`, so pushed events repaint nothing.
 
 ### `_sheet`, not `sheet`, when only reading state
 
-`actor.sheet` *constructs* an Application on first access (`client-document.mjs:213-231`). Polling N
-actors through it would instantiate N sheets every interval. The read-only probe is
+`actor.sheet` *constructs* an Application on first access (`client-document.mjs:213-231`). Reading
+state through it would instantiate a sheet just to ask whether it is open. The art script's `isOpen` probe is
 `!!(a._sheet && a._sheet.rendered)`; `_sheet` is only nulled in `_onSheetChange`, never by `close()`.
 The toggle script uses `a.sheet` deliberately, because there it *wants* the construction.
 
@@ -279,7 +303,8 @@ headers on the bucket.
   half to flush; single ownership makes that guaranteed rather than something to reason about.
 - Client timeout is 25 s, inside the relay's 30 s, so our error surfaces first.
 - On disconnect, `pending` is drained so in-flight callers fail immediately instead of waiting out
-  the timeout, and the art cache is cleared because a new session may be a different world.
+  the timeout, and the **token** art cache is cleared on the next session start because a new session
+  may be a different world. Condition art is kept: it depends only on the game system.
 - The relay's WS `download-file` and `sheet-screenshot` **return no bytes** — `format` is stripped,
   the callback is nil, and the payload is discarded. Do not try to move images over `/ws/api`.
 
@@ -313,6 +338,32 @@ appear and do nothing. Connection fields live in the sheet action's property ins
 **The API key is never echoed to the PI** (`hasApiKey: bool` instead), an empty incoming `apiKey`
 means "leave unchanged", and `Config`'s `Debug` is hand-written to redact.
 
+### Offline repaint
+
+`Relay::teardown` fires `session_ended` only on a connected→disconnected transition, and `main.rs`
+repaints both actions and refreshes PIs on it. Without that, the `offline` variants were only shown
+on the next unrelated repaint.
+
+### Repaint refetches missing art
+
+`repaint_visible` calls `refetch_if_missing` for every instance, which spawns `ensure_art` when the
+relay is up and the cache has no entry. `ensure_art` is otherwise only reached from `will_appear` /
+`did_receive_settings` / `refreshArt`, so before this a cleared cache (session start, border colour
+change) or a TTL-expired entry left the button on its manifest default until it was re-placed. Only
+the repaint path spawns — `ensure_art`'s own trailing `paint` never does — so a failing fetch can't
+loop; it just retries on the next repaint.
+
+### Relay write race (fixed in the relay fork)
+
+The relay wrote to each `/ws/api` connection from several goroutines with no lock: request-response
+goroutines, the hook-event fanout running on the Foundry read pump, and interactive-session frames.
+gorilla/websocket panics on concurrent writes, and in a response goroutine nothing recovers it, so
+the **relay process** died. The trigger was pressing a condition on several tokens: the
+`toggleCondition` result and a burst of `hooks` firehose events arrive together. Symptom here:
+every button fell back to its default icon (reconnect → cache clear, before the refetch above).
+Fixed in `foundryvtt-rest-api-relay/go-relay/internal/ws/client_api.go` (`writeAPIConn`, a
+per-connection mutex), with `client_api_write_test.go` reproducing the panic under `-race`.
+
 ### One manifest state, not two
 
 Two states would let OpenDeck advance the state index on press, so the button would flip visually
@@ -321,25 +372,59 @@ even when `render({force:true})` was swallowed by a permission failure — it wo
 
 ### Property inspectors are per-action
 
-`pi.html` (counter) and `pi-sheet.html` (sheet) share no fields, so each is self-contained with
+`pi.html` (counter), `pi-sheet.html` (sheet) and `pi-condition.html` (condition) share no per-button
+fields, so each is self-contained with
 inline styles. A shared `pi.css` was considered and rejected: it adds an unverifiable stylesheet load
 path on a headless box for the sake of ~25 duplicated lines.
 
 ## Testing
 
-Three zero-dependency Node harnesses in the scratchpad, none committed (they would be the only JS in
+Zero-dependency Node harnesses in the scratchpad, none committed (they would be the only JS in
 a Rust repo):
 
 | Harness | Covers |
 |---|---|
 | `mock-host.mjs` | The counter transcript. Ignores `getGlobalSettings`/`setGlobalSettings` so plugin-level frames don't shift its sequential assertions. |
-| `sheet-test.mjs` | Mock OpenDeck **and** mock relay: auth, art fetch, toggle both ways, cache, batched polling, PI round trips, ping/pong, poller parking. |
-| `sheet-failures.mjs` | Fail-closed on `notifyOnExecuteJs`, `execute-js` disabled, disconnect and reconnect. |
+| `sheet-test.mjs` | Mock OpenDeck **and** mock relay: auth, art fetch, toggle both ways, cache, PI round trips, ping/pong. Predates push; its polling assertions are stale. |
+| `sheet-failures.mjs` | `execute-js` disabled, disconnect and reconnect. Predates push; its fail-closed assertions are stale. |
+| `harness.mjs` | Shared RFC 6455 server/frame helpers imported by the two below. |
+| `push-test.mjs` | `subscribe` `hooks` right after auth, exactly one `execute-js` per session, snapshot paints, pushed `sheet` repaints, firehose/duplicate events ignored, **zero `execute-js` over a 15 s idle**, empty snapshot closes all, toggle still works, reconnect with companion missing warns, PI shows `companion` and no `pollMs`. Also checks the legacy `.sheet` hook name is ignored. |
+| `condition-test.mjs` | Condition action: `Pick condition` title, `none` with no selection and a press that alerts without toggling, on/off/mixed from pushed selections, implied status shows on, unchanged selection doesn't repaint, press sends `toggleCondition` and does **not** repaint by itself, Foundry-side error alerts, `getConditions` PI round trip, shared connection state, relay drop repaints `offline`, art cached per condition. |
+| `module-unit.mjs` | The companion module's `main.mjs` imported under stubbed `Hooks`/`game`/`canvas`/`CONFIG`: condition filtering, selection dedupe, change-only emits, tri-state toggle. |
 
 Assertions compare **parsed, key-sorted** objects — `set_settings`/`set_image` serialize through
 maps, so key order is alphabetical rather than declaration order.
 
-Two harness lessons worth keeping: waits must **filter by frame kind**, because the background poll
-loop interleaves `execute-js` frames into the relay inbox and a naive "next frame" consumes the wrong
-one; and the mock relay must stay **self-consistent** — if a toggle flips its state, its poll answers
-have to agree, or the next poll legitimately contradicts the toggle.
+Two harness lessons worth keeping: waits must **filter by frame kind**, because art fetches and
+toggles interleave `execute-js` frames into the relay inbox and a naive "next frame" consumes the
+wrong one; and the mock relay must stay **self-consistent** — its snapshot, art `isOpen` and toggle
+answers must agree, or a later answer legitimately contradicts an earlier one.
+
+## The condition action
+
+Each button is bound to one status id (`statusId`, plus `statusName` cached for painting before art
+arrives). The list, toggling and artwork all live in the companion module's API; see its `CLAUDE.md`
+for the Foundry side (tri-state rule, implied statuses, why exhaustion is excluded).
+
+- **Selection is pushed, never queried.** The companion's `{event:"selection", count, statuses}`
+  replaces `ConditionState.selection` wholesale; `resync` seeds it from `snapshot().selection` and
+  resets it to empty when the companion is missing. Unchanged selections don't repaint.
+- **`key_up` never repaints.** It sends `toggleCondition` and only acts on an error (alert). The
+  effect hooks in Foundry produce a `selection` event, and that is what repaints — so the button can
+  never show a state Foundry didn't actually reach. It also alerts locally, without a round trip,
+  when the last known selection is empty.
+- **Variants**, chosen in `Variant::pick`:
+
+  | Condition | Variant |
+  |---|---|
+  | relay down | `offline` |
+  | `count == 0` | `none` |
+  | `statuses[id]` absent/0 | `off` |
+  | `statuses[id] >= count` | `on` |
+  | otherwise | `mixed` |
+
+  All five are rendered in Foundry by `api.conditionArt` and cached per `(id, border colour)`, so a
+  colour change refetches (`appearance_differs` clears both caches).
+- The instance mirror exists for the same `settings_json` reason as the sheet action's.
+- The condition PI omits the sheet-only *Open indicator* field. `setConnection` only overwrites
+  fields present in the payload, so saving from either PI never clobbers the other's.
