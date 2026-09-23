@@ -1,12 +1,50 @@
 use crate::condition::Condition;
 use crate::foundry;
+use crate::initiative::Initiative;
 use crate::sheet::Sheet;
 
 use openaction::*;
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 
-pub async fn event_loop(sheet: Sheet, condition: Condition) {
+#[derive(Clone)]
+pub struct Actions {
+	pub sheet: Sheet,
+	pub condition: Condition,
+	pub initiative: Initiative,
+}
+
+impl Actions {
+	pub async fn repaint_all(&self) {
+		self.sheet.repaint_visible().await;
+		self.condition.repaint_visible().await;
+		self.initiative.repaint_visible().await;
+	}
+
+	pub async fn clear_art(&self) {
+		self.sheet.state.clear_art().await;
+		self.condition.state.clear_art().await;
+	}
+
+	pub async fn push_connection_state_to_all(&self) {
+		for instance in visible_instances(Sheet::UUID).await {
+			self.sheet.push_connection_state(&instance).await;
+		}
+		for instance in visible_instances(Condition::UUID).await {
+			self.condition.push_connection_state(&instance).await;
+		}
+		for instance in visible_instances(Initiative::UUID).await {
+			self.initiative.push_connection_state(&instance).await;
+		}
+	}
+}
+
+pub async fn event_loop(actions: Actions) {
+	let Actions {
+		sheet,
+		condition,
+		initiative,
+	} = &actions;
 	let mut events = sheet.relay.events.subscribe();
 	loop {
 		match events.recv().await {
@@ -14,34 +52,41 @@ pub async fn event_loop(sheet: Sheet, condition: Condition) {
 				Some("sheet" | "snapshot") => {
 					if sheet.state.apply_payload(&payload).await {
 						sheet.repaint_visible().await;
+						initiative.repaint_visible().await;
 					}
 				}
 				Some("selection") => {
 					if condition.state.apply_selection(&payload).await {
 						condition.repaint_visible().await;
+						initiative.repaint_visible().await;
+					}
+				}
+				Some("combat") => {
+					if initiative
+						.state
+						.apply_combat(payload.get("combat").filter(|v| !v.is_null()))
+						.await
+					{
+						initiative.repaint_visible().await;
 					}
 				}
 				other => log::debug!("ignoring companion event {other:?}"),
 			},
 			Err(RecvError::Lagged(skipped)) => {
 				log::warn!("dropped {skipped} companion event(s); resyncing");
-				resync(sheet.clone(), condition.clone()).await;
+				resync(actions.clone()).await;
 			}
 			Err(RecvError::Closed) => return,
 		}
 	}
 }
 
-pub async fn push_connection_state_to_all(sheet: &Sheet, condition: &Condition) {
-	for instance in visible_instances(Sheet::UUID).await {
-		sheet.push_connection_state(&instance).await;
-	}
-	for instance in visible_instances(Condition::UUID).await {
-		condition.push_connection_state(&instance).await;
-	}
-}
-
-pub async fn resync(sheet: Sheet, condition: Condition) {
+pub async fn resync(actions: Actions) {
+	let Actions {
+		sheet,
+		condition,
+		initiative,
+	} = &actions;
 	let value = match sheet.relay.execute_js(foundry::sync_script()).await {
 		Ok(value) => value,
 		Err(error) => {
@@ -65,7 +110,7 @@ pub async fn resync(sheet: Sheet, condition: Condition) {
 		Some(version) => log::info!("companion module {} v{version}", foundry::COMPANION_ID),
 		None => log::warn!(
 			"companion module '{}' is not active in this world; buttons will not track sheets \
-			 opened or closed directly in Foundry, and condition buttons will not work",
+			 opened or closed directly in Foundry, and condition and initiative buttons will not work",
 			foundry::COMPANION_ID
 		),
 	}
@@ -86,5 +131,13 @@ pub async fn resync(sheet: Sheet, condition: Condition) {
 		condition.repaint_visible().await;
 	}
 
-	push_connection_state_to_all(&sheet, &condition).await;
+	if initiative
+		.state
+		.apply_combat(value.get("combat").filter(|v| !v.is_null()))
+		.await || changed
+	{
+		initiative.repaint_visible().await;
+	}
+
+	actions.push_connection_state_to_all().await;
 }

@@ -5,6 +5,7 @@ mod counter;
 mod events;
 mod foundry;
 mod image;
+mod initiative;
 mod relay;
 mod sheet;
 
@@ -17,8 +18,7 @@ use tokio::sync::RwLock;
 struct Handler {
 	config: Arc<RwLock<Config>>,
 	relay: Arc<relay::Relay>,
-	sheet: sheet::Sheet,
-	condition: condition::Condition,
+	actions: events::Actions,
 }
 
 #[async_trait]
@@ -50,12 +50,10 @@ impl GlobalEventHandler for Handler {
 			self.relay.config_changed.notify_waiters();
 		}
 		if repaint {
-			self.sheet.state.clear_art().await;
-			self.condition.state.clear_art().await;
-			self.sheet.repaint_visible().await;
-			self.condition.repaint_visible().await;
+			self.actions.clear_art().await;
+			self.actions.repaint_all().await;
 		}
-		events::push_connection_state_to_all(&self.sheet, &self.condition).await;
+		self.actions.push_connection_state_to_all().await;
 		Ok(())
 	}
 
@@ -90,42 +88,48 @@ async fn main() {
 		config: config.clone(),
 		state: Arc::new(condition::ConditionState::default()),
 	};
+	let initiative = initiative::Initiative {
+		sheet: sheet.clone(),
+		condition: condition.state.clone(),
+		state: Arc::new(initiative::InitiativeState::default()),
+	};
+	let actions = events::Actions {
+		sheet: sheet.clone(),
+		condition: condition.clone(),
+		initiative: initiative.clone(),
+	};
 
 	set_global_event_handler(Box::leak(Box::new(Handler {
 		config: config.clone(),
 		relay: relay.clone(),
-		sheet: sheet.clone(),
-		condition: condition.clone(),
+		actions: actions.clone(),
 	})));
 
 	tokio::spawn(relay.clone().run_forever());
-	tokio::spawn(events::event_loop(sheet.clone(), condition.clone()));
+	tokio::spawn(events::event_loop(actions.clone()));
+	tokio::spawn(initiative.clone().art_loop());
 
 	{
-		let sheet = sheet.clone();
-		let condition = condition.clone();
+		let actions = actions.clone();
 		let relay = relay.clone();
 		tokio::spawn(async move {
 			loop {
 				relay.session_started.notified().await;
-				sheet.state.clear_art().await;
-				events::resync(sheet.clone(), condition.clone()).await;
-				sheet.repaint_visible().await;
-				condition.repaint_visible().await;
+				actions.sheet.state.clear_art().await;
+				events::resync(actions.clone()).await;
+				actions.repaint_all().await;
 			}
 		});
 	}
 
 	{
-		let sheet = sheet.clone();
-		let condition = condition.clone();
+		let actions = actions.clone();
 		let relay = relay.clone();
 		tokio::spawn(async move {
 			loop {
 				relay.session_ended.notified().await;
-				sheet.repaint_visible().await;
-				condition.repaint_visible().await;
-				events::push_connection_state_to_all(&sheet, &condition).await;
+				actions.repaint_all().await;
+				actions.push_connection_state_to_all().await;
 			}
 		});
 	}
@@ -133,6 +137,7 @@ async fn main() {
 	register_action(counter::Counter).await;
 	register_action(sheet.clone()).await;
 	register_action(condition.clone()).await;
+	register_action(initiative.clone()).await;
 
 	if let Err(error) = run(std::env::args().collect()).await {
 		log::error!("plugin exited: {error}");

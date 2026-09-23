@@ -55,9 +55,9 @@ try {{
   notify = !!game.settings.get("foundry-rest-api", "notifyOnExecuteJs");
 }} catch (e) {{}}
 const m = game.modules.get({id});
-if (!m || !m.active || !m.api) return {{ module: null, notify, open: null, selection: null }};
+if (!m || !m.active || !m.api) return {{ module: null, notify, open: null, selection: null, combat: null }};
 const snap = m.api.snapshot();
-return {{ module: snap.version, notify, open: snap.open, selection: snap.selection }};
+return {{ module: snap.version, notify, open: snap.open, selection: snap.selection, combat: snap.combat }};
 "#,
 		id = js(COMPANION_ID)
 	)
@@ -76,6 +76,10 @@ try {{
 "#,
 		id = js(COMPANION_ID)
 	)
+}
+
+pub fn start_combat_script() -> String {
+	companion_call("startCombat()")
 }
 
 pub fn conditions_script() -> String {

@@ -117,10 +117,6 @@ impl Sheet {
 
 		let key = self.art_key(settings).await;
 		let entry = self.state.art.get(&key).await;
-		let (indicator, open_color) = {
-			let config = self.config.read().await;
-			(config.indicator, config.border_color.clone())
-		};
 
 		let name = match entry.as_ref() {
 			Some(e) if !e.name.is_empty() => e.name.clone(),
@@ -133,12 +129,28 @@ impl Sheet {
 			return instance.set_title(Some(name), None).await;
 		};
 
-		let mut title = if settings.show_title {
+		let title = if settings.show_title {
 			Some(name)
 		} else {
 			None
 		};
 
+		let (image, title) = self.styled(&entry, open, online, title).await;
+		instance.set_image(Some(image), None).await?;
+		instance.set_title(title, None).await
+	}
+
+	pub async fn styled(
+		&self,
+		entry: &ArtEntry,
+		open: bool,
+		online: bool,
+		mut title: Option<String>,
+	) -> (String, Option<String>) {
+		let (indicator, open_color) = {
+			let config = self.config.read().await;
+			(config.indicator, config.border_color.clone())
+		};
 		let image = match indicator {
 			Indicator::Border => entry.variant(open, online).to_string(),
 			Indicator::Svg => {
@@ -160,9 +172,7 @@ impl Sheet {
 				entry.closed.clone()
 			}
 		};
-
-		instance.set_image(Some(image), None).await?;
-		instance.set_title(title, None).await
+		(image, title)
 	}
 
 	pub async fn repaint_visible(&self) {
@@ -192,16 +202,30 @@ impl Sheet {
 		tokio::spawn(async move { this.ensure_art(instance_id, settings).await });
 	}
 
-	async fn ensure_art(&self, instance_id: InstanceId, settings: SheetSettings) {
+	pub async fn cached_art(&self, settings: &SheetSettings) -> Option<ArtEntry> {
+		self.state.art.get(&self.art_key(settings).await).await
+	}
+
+	pub async fn is_open(&self, uuid: &str) -> bool {
+		self.state
+			.open
+			.read()
+			.await
+			.get(uuid)
+			.copied()
+			.unwrap_or(false)
+	}
+
+	pub async fn fetch_art(&self, settings: &SheetSettings) -> bool {
 		if settings.actor_uuid.trim().is_empty() {
-			return;
+			return false;
 		}
-		let key = self.art_key(&settings).await;
+		let key = self.art_key(settings).await;
 		if self.state.art.get(&key).await.is_some() {
-			return;
+			return false;
 		}
 		if !self.state.inflight.lock().await.insert(key.clone()) {
-			return;
+			return false;
 		}
 
 		let (open_color, _) = {
@@ -260,10 +284,30 @@ impl Sheet {
 			}
 			Err(error) => log::warn!("artwork for {} failed: {error}", settings.actor_uuid),
 		}
+		true
+	}
 
-		if let Some(instance) = get_instance(instance_id).await {
+	async fn ensure_art(&self, instance_id: InstanceId, settings: SheetSettings) {
+		if self.fetch_art(&settings).await
+			&& let Some(instance) = get_instance(instance_id).await
+		{
 			let _ = self.paint(&instance, &settings).await;
 		}
+	}
+
+	pub async fn toggle(&self, uuid: &str) -> Result<(), String> {
+		let value = self
+			.relay
+			.execute_js(foundry::toggle_script(uuid))
+			.await
+			.map_err(|e| e.to_string())?;
+		if let Some(error) = value.get("error").and_then(Value::as_str) {
+			return Err(error.to_string());
+		}
+		let open = value.get("open").and_then(Value::as_bool).unwrap_or(false);
+		self.state.open.write().await.insert(uuid.to_string(), open);
+		self.repaint_visible().await;
+		Ok(())
 	}
 
 	pub async fn push_connection_state(&self, instance: &Instance) {
@@ -330,25 +374,8 @@ impl Action for Sheet {
 			return instance.show_alert().await;
 		}
 
-		match self
-			.relay
-			.execute_js(foundry::toggle_script(&settings.actor_uuid))
-			.await
-		{
-			Ok(value) => {
-				if let Some(error) = value.get("error").and_then(Value::as_str) {
-					log::warn!("toggle {} failed: {error}", settings.actor_uuid);
-					return instance.show_alert().await;
-				}
-				let open = value.get("open").and_then(Value::as_bool).unwrap_or(false);
-				self.state
-					.open
-					.write()
-					.await
-					.insert(settings.actor_uuid.clone(), open);
-				self.repaint_visible().await;
-				Ok(())
-			}
+		match self.toggle(&settings.actor_uuid).await {
+			Ok(()) => Ok(()),
 			Err(error) => {
 				log::warn!("toggle {} failed: {error}", settings.actor_uuid);
 				instance.show_alert().await

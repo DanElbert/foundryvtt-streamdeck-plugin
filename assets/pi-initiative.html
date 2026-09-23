@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<style>
+			body {
+				margin: 0;
+				padding: 12px;
+				font: 13px/1.4 system-ui, sans-serif;
+				color: #d8d8d8;
+				background: #2d2d2d;
+			}
+			label {
+				display: block;
+				margin-bottom: 4px;
+				color: #969696;
+			}
+			input,
+			select {
+				width: 100%;
+				box-sizing: border-box;
+				padding: 5px 6px;
+				color: #d8d8d8;
+				background: #3d3d3d;
+				border: 1px solid #555;
+				border-radius: 3px;
+			}
+			input[type="color"] {
+				padding: 2px;
+				height: 28px;
+			}
+			input[type="checkbox"] {
+				width: auto;
+				margin-right: 6px;
+			}
+			.field + .field {
+				margin-top: 12px;
+			}
+			.row {
+				display: flex;
+				gap: 6px;
+				align-items: center;
+				margin-top: 6px;
+			}
+			button {
+				padding: 4px 8px;
+				color: #d8d8d8;
+				background: #3d3d3d;
+				border: 1px solid #555;
+				border-radius: 3px;
+				cursor: pointer;
+			}
+			button:hover {
+				background: #4a4a4a;
+			}
+			#status {
+				color: #969696;
+				font-size: 12px;
+			}
+			.hint {
+				margin: 4px 0 0;
+				color: #969696;
+				font-size: 12px;
+			}
+			details {
+				margin-top: 16px;
+				border-top: 1px solid #444;
+				padding-top: 10px;
+			}
+			summary {
+				cursor: pointer;
+				color: #969696;
+			}
+			details > .field:first-of-type {
+				margin-top: 10px;
+			}
+			.warn {
+				margin: 6px 0 0;
+				color: #e0a030;
+				font-size: 12px;
+			}
+			.inline {
+				display: flex;
+				align-items: center;
+			}
+		</style>
+	</head>
+
+	<body>
+		<div class="field inline">
+			<input id="showTitle" type="checkbox" />
+			<label for="showTitle" style="margin: 0">Show combatant name</label>
+		</div>
+		<p class="hint">
+			With no combat: select tokens in Foundry and press to start a combat, add them and roll
+			initiative. During a combat: shows whose turn it is; press to open or close their sheet.
+		</p>
+		<p class="hint" id="status"></p>
+
+		<details>
+			<summary>Relay connection (shared by all buttons)</summary>
+			<div class="field">
+				<label for="relayUrl">Relay URL</label>
+				<input id="relayUrl" type="text" placeholder="wss://foundryrestapi.fly.dev" />
+			</div>
+			<div class="field">
+				<label for="clientId">Client ID (optional)</label>
+				<input id="clientId" type="text" placeholder="(taken from the API key)" />
+				<p class="hint" id="resolved"></p>
+			</div>
+			<div class="field">
+				<label for="apiKey">API key</label>
+				<input id="apiKey" type="password" placeholder="(required)" />
+			</div>
+			<p class="warn">
+				Install and enable the Stream Deck Companion module (foundryvtt-streamdeck) in the
+				world, and turn OFF "Notify on Execute JS" in the Foundry REST API module settings.
+			</p>
+			<div class="field">
+				<label for="borderColor">Border colour</label>
+				<input id="borderColor" type="color" />
+			</div>
+			<div class="row">
+				<button id="saveConn" type="button">Save connection</button>
+			</div>
+		</details>
+
+		<script>
+			function connectOpenActionSocket(inPort, inPropertyInspectorUUID, inRegisterEvent, inInfo, inActionInfo) {
+				const websocket = new WebSocket("ws://localhost:" + inPort);
+				const actionInfo = JSON.parse(inActionInfo);
+				const context = actionInfo.context;
+				const action = actionInfo.action;
+				let settings = actionInfo.payload.settings ?? {};
+
+				const el = (id) => document.getElementById(id);
+				const idle = (node) => document.activeElement !== node;
+
+				const toPlugin = (payload) =>
+					websocket.send(JSON.stringify({ event: "sendToPlugin", context, action, payload }));
+
+				const paint = () => {
+					if (idle(el("showTitle"))) el("showTitle").checked = settings.showTitle !== false;
+				};
+
+				const commit = () => {
+					settings.showTitle = el("showTitle").checked;
+					websocket.send(JSON.stringify({ event: "setSettings", context, payload: settings }));
+				};
+
+				websocket.onopen = () => {
+					websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inPropertyInspectorUUID }));
+					toPlugin({ event: "getConnection" });
+				};
+
+				websocket.onmessage = (event) => {
+					const data = JSON.parse(event.data);
+
+					if (data.event === "didReceiveSettings") {
+						settings = data.payload.settings ?? {};
+						paint();
+						return;
+					}
+					if (data.event !== "sendToPropertyInspector") return;
+					const p = data.payload ?? {};
+
+					if (p.event === "connection") {
+						if (idle(el("relayUrl"))) el("relayUrl").value = p.relayUrl ?? "";
+						if (idle(el("clientId"))) el("clientId").value = p.clientId ?? "";
+						if (idle(el("borderColor"))) el("borderColor").value = p.borderColor ?? "#ff6400";
+						el("apiKey").placeholder = p.hasApiKey ? "(unchanged)" : "(required)";
+						el("resolved").textContent = p.resolvedClientId
+							? "relay resolved: " + p.resolvedClientId
+							: "";
+						let state = p.connected ? "relay connected" : "relay disconnected";
+						if (p.connected) {
+							state += p.companion ? " — companion " + p.companion : " — companion module missing";
+						}
+						el("status").textContent = state;
+					}
+				};
+
+				el("showTitle").addEventListener("change", commit);
+				el("saveConn").addEventListener("click", () =>
+					toPlugin({
+						event: "setConnection",
+						relayUrl: el("relayUrl").value.trim(),
+						clientId: el("clientId").value.trim(),
+						apiKey: el("apiKey").value,
+						borderColor: el("borderColor").value,
+					}),
+				);
+
+				paint();
+			}
+
+			const connectElgatoStreamDeckSocket = connectOpenActionSocket;
+		</script>
+	</body>
+</html>

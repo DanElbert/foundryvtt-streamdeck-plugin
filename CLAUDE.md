@@ -18,7 +18,8 @@ scaffold: one Counter action plus a minimal property inspector. No Foundry integ
 | `src/counter.rs` | Scaffold action. |
 | `src/sheet.rs` | Sheet-toggle action and its instance mirror. |
 | `src/condition.rs` | Condition-toggle action, its instance mirror, current token selection. |
-| `src/events.rs` | Companion event loop (dispatches to both actions) and the per-session resync. |
+| `src/initiative.rs` | Initiative action: combat state, start-combat press, current-combatant display via the sheet pipeline. |
+| `src/events.rs` | `Actions` (sheet + condition + initiative), the companion event loop and the per-session resync. |
 | `src/connection.rs` | Connection state pushed to, and `setConnection` from, both actions' PIs. Global config, so one implementation. |
 | `assets/` | **Staging directory, not an installed path.** See below. |
 | `build.sh` | `cargo build` + assemble `dist/<uuid>.sdPlugin/` for hand-copying. |
@@ -372,7 +373,7 @@ even when `render({force:true})` was swallowed by a permission failure — it wo
 
 ### Property inspectors are per-action
 
-`pi.html` (counter), `pi-sheet.html` (sheet) and `pi-condition.html` (condition) share no per-button
+`pi.html` (counter), `pi-sheet.html` (sheet), `pi-condition.html` (condition) and `pi-initiative.html` (initiative) share no per-button
 fields, so each is self-contained with
 inline styles. A shared `pi.css` was considered and rejected: it adds an unverifiable stylesheet load
 path on a headless box for the sake of ~25 duplicated lines.
@@ -390,7 +391,8 @@ a Rust repo):
 | `harness.mjs` | Shared RFC 6455 server/frame helpers imported by the two below. |
 | `push-test.mjs` | `subscribe` `hooks` right after auth, exactly one `execute-js` per session, snapshot paints, pushed `sheet` repaints, firehose/duplicate events ignored, **zero `execute-js` over a 15 s idle**, empty snapshot closes all, toggle still works, reconnect with companion missing warns, PI shows `companion` and no `pollMs`. Also checks the legacy `.sheet` hook name is ignored. |
 | `condition-test.mjs` | Condition action: `Pick condition` title, `none` with no selection and a press that alerts without toggling, on/off/mixed from pushed selections, implied status shows on, unchanged selection doesn't repaint, press sends `toggleCondition` and does **not** repaint by itself, Foundry-side error alerts, `getConditions` PI round trip, shared connection state, relay drop repaints `offline`, art cached per condition. |
-| `module-unit.mjs` | The companion module's `main.mjs` imported under stubbed `Hooks`/`game`/`canvas`/`CONFIG`: condition filtering, selection dedupe, change-only emits, tri-state toggle. |
+| `initiative-test.mjs` | Initiative action: dim swords + alert with no execute-js when nothing is selected, `Start (N)`, press sends `startCombat()` without repainting, combat push fetches the combatant's art and titles `Name\nR1`, press toggles their sheet (open border), a pushed sheet close repaints it, turn change, unstarted combat drops the round, `Empty` combat alerts, relay drop → offline, art fetched once. |
+| `module-unit.mjs` | The companion module's `main.mjs` imported under stubbed `Hooks`/`game`/`canvas`/`CONFIG`/`Combat`/`TokenDocument`: condition filtering, selection dedupe, change-only emits, tri-state toggle, `startCombat` call order and refusals, `turns[0]` fallback, combat change-only emit and `null` on delete. |
 
 Assertions compare **parsed, key-sorted** objects — `set_settings`/`set_image` serialize through
 maps, so key order is alphabetical rather than declaration order.
@@ -428,3 +430,43 @@ for the Foundry side (tri-state rule, implied statuses, why exhaustion is exclud
 - The instance mirror exists for the same `settings_json` reason as the sheet action's.
 - The condition PI omits the sheet-only *Open indicator* field. `setConnection` only overwrites
   fields present in the payload, so saving from either PI never clobbers the other's.
+
+## The initiative action
+
+State is the companion's `{event:"combat", combat}` push (see the module's `CLAUDE.md` for which combat and
+whose turn); `resync` seeds it from `snapshot().combat`. The action owns no art or toggle code of its
+own — it holds a `Sheet` clone and borrows:
+
+- `Sheet::cached_art` / `fetch_art` with synthetic `SheetSettings { actor_uuid, art_source: Token }`,
+  so combatant art shares the sheet cache (an Actor Sheet button for the same actor reuses it).
+- `Sheet::styled`, so the configured *Open indicator* applies here too.
+- `Sheet::toggle` for the press, and `Sheet::is_open` for the border. Sheet events therefore repaint
+  initiative as well, and `selection` events repaint it for the `Start (N)` count (read through
+  `ConditionState::selection_count`).
+
+| State | Image | Title |
+|---|---|---|
+| no combat, 0 selected (or offline) | dim swords | none |
+| no combat, N selected | bright swords | `Start (N)` |
+| combat, no combatant / no actor | swords | `Empty` |
+| combatant | sheet art variant (open/closed/offline) | `Name\nR{round}`; no round when unstarted |
+
+The swords are an SVG string in `initiative.rs` sent as a base64 data URI (`set_image` takes those;
+the manifest icon still has to be the file `assets/initiative.svg`).
+
+**The art fetch can't call `repaint_visible` directly.** `paint` spawns it, and a spawned future
+that reaches `paint` again is a recursive opaque type the compiler can't prove `Send`. The fetch
+signals `InitiativeState::art_ready` instead and `Initiative::art_loop` (spawned in `main.rs`) does the
+repaint. It only signals when art actually landed in the cache, so a failing fetch can't loop.
+
+**The start press never repaints.** Like conditions, the combat that `startCombat()` creates reaches
+the deck as a pushed `combat` event.
+
+`events::Actions` bundles the three event-driven actions so `event_loop`, `resync`, the session
+start/end tasks and the global-settings handler take one argument:
+
+| Event | Applied to | Repaints |
+|---|---|---|
+| `sheet` / `snapshot` | sheet | sheet + initiative |
+| `selection` | condition | condition + initiative |
+| `combat` | initiative | initiative |

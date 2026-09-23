@@ -3,15 +3,16 @@
 An [OpenAction](https://openaction.amankhanna.me/) plugin for stream controller devices, built with
 the `openaction` Rust crate. Runs under [OpenDeck](https://github.com/nekename/OpenDeck) or Tacto.
 
-Three actions: a **Counter** scaffold, an **Actor Sheet** button that toggles a character sheet
-open and closed in Foundry and shows that actor's token artwork, and a **Condition** button that
-shows and toggles a condition on the selected tokens.
+Four actions: a **Counter** scaffold, an **Actor Sheet** button that toggles a character sheet
+open and closed in Foundry and shows that actor's token artwork, a **Condition** button that
+shows and toggles a condition on the selected tokens, and an **Initiative** button that starts
+combat and then follows whose turn it is.
 
 ## Requirements
 
 - Rust (stable)
 - OpenDeck
-- For the Actor Sheet and Condition actions: a Foundry world (dnd5e, for conditions) running the
+- For the Actor Sheet, Condition and Initiative actions: a Foundry world (dnd5e, for conditions) running the
   [REST API module](https://github.com/ThreeHats/foundryvtt-rest-api), paired with a relay, a
   relay API key, and the
   [Stream Deck Companion module](https://github.com/DanElbert/foundryvtt-streamdeck-module)
@@ -118,6 +119,24 @@ removes it from all of them. The key updates once Foundry has applied the change
 A condition implied by another one, such as *incapacitated* while a token is unconscious,
 paralyzed, petrified or stunned, shows as on, but pressing can't remove it. Remove the condition
 that causes it instead.
+
+## The Initiative action
+
+One key that does two jobs, depending on whether a combat exists (the one the GM's combat tracker
+is showing).
+
+**No combat:** select tokens in Foundry and press. The plugin creates a combat, adds the selected
+tokens, rolls initiative for all of them (no dialogs; hidden tokens' rolls go to the GM) and starts
+round 1. The key shows crossed swords, dim when nothing is selected and bright with **Start (N)**
+when N tokens are selected.
+
+**During a combat:** the key shows the current combatant's token art, their name and the round
+(`R3`), and follows turn changes made in the tracker. Pressing opens their character sheet, and
+pressing again closes it; the key gets the same open border as an Actor Sheet button. A combat that
+has been set up but not started shows the first combatant in the tracker, without a round.
+
+The key never ends or advances a combat; do that in the tracker. The *Show combatant name* option
+hides the name but keeps the round.
 
 ## Logs
 

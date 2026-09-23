@@ -96,6 +96,10 @@ impl ConditionState {
 		self.art.clear().await;
 	}
 
+	pub async fn selection_count(&self) -> u32 {
+		self.selection.read().await.count
+	}
+
 	pub async fn reset_selection(&self) -> bool {
 		let mut current = self.selection.write().await;
 		let changed = *current != Selection::default();
