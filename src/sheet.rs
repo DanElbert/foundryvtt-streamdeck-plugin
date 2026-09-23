@@ -232,13 +232,14 @@ impl Sheet {
 			let config = self.config.read().await;
 			(config.border_color.clone(), config.indicator)
 		};
-		let script = foundry::art_script(
+		let result = foundry::actor_art(
+			&self.relay,
 			&settings.actor_uuid,
 			settings.art_source,
 			&open_color,
 			OFFLINE_COLOR,
-		);
-		let result = self.relay.execute_js(script).await;
+		)
+		.await;
 		self.state.inflight.lock().await.remove(&key);
 
 		match result {
@@ -296,9 +297,7 @@ impl Sheet {
 	}
 
 	pub async fn toggle(&self, uuid: &str) -> Result<(), String> {
-		let value = self
-			.relay
-			.execute_js(foundry::toggle_script(uuid))
+		let value = foundry::toggle_sheet(&self.relay, uuid)
 			.await
 			.map_err(|e| e.to_string())?;
 		if let Some(error) = value.get("error").and_then(Value::as_str) {
@@ -370,7 +369,7 @@ impl Action for Sheet {
 	}
 
 	async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-		if settings.actor_uuid.trim().is_empty() {
+		if settings.actor_uuid.trim().is_empty() || !foundry::companion_ready(&self.relay).await {
 			return instance.show_alert().await;
 		}
 

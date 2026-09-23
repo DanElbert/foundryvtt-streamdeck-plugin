@@ -240,6 +240,10 @@ impl Action for Initiative {
 	) -> OpenActionResult<()> {
 		let combat = self.state.combat.read().await.clone();
 
+		if combat.is_some() && !foundry::companion_ready(&self.sheet.relay).await {
+			return instance.show_alert().await;
+		}
+
 		if let Some(combat) = combat {
 			let Some(uuid) = combat.combatant.and_then(|c| c.actor_uuid) else {
 				return instance.show_alert().await;
@@ -260,12 +264,7 @@ impl Action for Initiative {
 			return instance.show_alert().await;
 		}
 
-		match self
-			.sheet
-			.relay
-			.execute_js(foundry::start_combat_script())
-			.await
-		{
+		match foundry::start_combat(&self.sheet.relay).await {
 			Ok(value) => match value.get("error").and_then(Value::as_str) {
 				Some(error) => {
 					log::warn!("start combat failed: {error}");

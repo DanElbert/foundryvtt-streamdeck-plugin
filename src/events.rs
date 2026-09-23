@@ -1,6 +1,7 @@
 use crate::condition::Condition;
 use crate::foundry;
 use crate::initiative::Initiative;
+use crate::relay::RelayError;
 use crate::sheet::Sheet;
 
 use openaction::*;
@@ -50,6 +51,16 @@ pub async fn event_loop(actions: Actions) {
 		match events.recv().await {
 			Ok(payload) => match payload.get("event").and_then(Value::as_str) {
 				Some("sheet" | "snapshot") => {
+					if let Some(version) = payload.get("version").and_then(Value::as_str)
+						&& sheet.relay.companion().await.as_deref() != Some(version)
+					{
+						log::info!(
+							"companion module {} v{version} is active",
+							foundry::COMPANION_ID
+						);
+						sheet.relay.set_companion(Some(version.to_string())).await;
+						actions.push_connection_state_to_all().await;
+					}
 					if sheet.state.apply_payload(&payload).await {
 						sheet.repaint_visible().await;
 						initiative.repaint_visible().await;
@@ -87,32 +98,36 @@ pub async fn resync(actions: Actions) {
 		condition,
 		initiative,
 	} = &actions;
-	let value = match sheet.relay.execute_js(foundry::sync_script()).await {
+	let value = match foundry::sync(&sheet.relay).await {
 		Ok(value) => value,
+		Err(RelayError::Timeout) => {
+			log::warn!(
+				"companion module '{}' did not answer; it is not active in this world. Buttons \
+				 will not track Foundry, and presses will alert until it is enabled",
+				foundry::COMPANION_ID
+			);
+			Value::Null
+		}
+		Err(RelayError::Remote(message)) if message.contains("Unknown message type") => {
+			log::error!(
+				"relay rejected the '{}' request type ({message}); it needs the \
+				 foundryvtt-rest-api-relay fork patch",
+				foundry::REQUEST_TYPE
+			);
+			Value::Null
+		}
 		Err(error) => {
 			log::warn!("state sync failed: {error}");
 			return;
 		}
 	};
 
-	if value.get("notify").and_then(Value::as_bool) == Some(true) {
-		log::warn!(
-			"'Notify on Execute JS' is enabled in the Foundry REST API module; every press and \
-			 artwork fetch will whisper the GM. Turn that setting off."
-		);
-	}
-
 	let companion = value
-		.get("module")
+		.get("version")
 		.and_then(Value::as_str)
 		.map(str::to_string);
-	match &companion {
-		Some(version) => log::info!("companion module {} v{version}", foundry::COMPANION_ID),
-		None => log::warn!(
-			"companion module '{}' is not active in this world; buttons will not track sheets \
-			 opened or closed directly in Foundry, and condition and initiative buttons will not work",
-			foundry::COMPANION_ID
-		),
+	if let Some(version) = &companion {
+		log::info!("companion module {} v{version}", foundry::COMPANION_ID);
 	}
 	sheet.relay.set_companion(companion).await;
 

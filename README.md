@@ -16,6 +16,9 @@ combat and then follows whose turn it is.
   [REST API module](https://github.com/ThreeHats/foundryvtt-rest-api), paired with a relay, a
   relay API key, and the
   [Stream Deck Companion module](https://github.com/DanElbert/foundryvtt-streamdeck-module)
+- A relay built from the [DanElbert/foundryvtt-rest-api-relay](https://github.com/DanElbert/foundryvtt-rest-api-relay)
+  fork, which accepts the `streamdeck` request type the plugin uses. A stock relay rejects it, and the
+  plugin logs an error saying so.
 
 ## Build and install
 
@@ -65,16 +68,12 @@ manifest URL is:
 https://raw.githubusercontent.com/DanElbert/foundryvtt-streamdeck-module/main/module.json
 ```
 
-Then in **Configure Settings → Module Settings → REST API**:
+The plugin never runs JavaScript in Foundry, so **Allow Execute JavaScript** in the REST API module
+settings can be left **off** (recommended: with it on, anyone holding a relay key for the world can run
+arbitrary JavaScript in the GM's browser). *Notify on Execute JS* doesn't matter either.
 
-| Setting | Must be | Why |
-|---|---|---|
-| Allow Execute JavaScript | **on** | There is no sheet open/close endpoint; this is the only route. |
-| Notify on Execute JS | **off** | Otherwise every press and artwork fetch whispers the GM in chat. |
-
-Note that enabling *Allow Execute JavaScript* lets anyone holding a valid relay key for that world
-run arbitrary JavaScript in your GM browser session. Use a dedicated key; revoking it is the kill
-switch.
+Without the companion module enabled, the plugin logs a warning, the property inspector shows
+"companion module missing", and presses flash the alert.
 
 ### Plugin setup
 

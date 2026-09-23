@@ -1,5 +1,5 @@
 use crate::config::{Config, redact};
-use crate::foundry::EVENT_HOOK;
+use crate::foundry::{EVENT_HOOK, REQUEST_TYPE};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(8);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_INFLIGHT: usize = 64;
 const BACKOFF: [u64; 6] = [1, 2, 4, 8, 15, 30];
 const EVENT_CAPACITY: usize = 64;
@@ -177,10 +177,14 @@ impl Relay {
 							if let Some(types) =
 								value.get("supportedTypes").and_then(Value::as_array)
 							{
-								for required in ["search", "execute-js"] {
-									if !types.iter().any(|t| t.as_str() == Some(required)) {
-										log::warn!("relay does not advertise '{required}'");
-									}
+								if !types.iter().any(|t| t.as_str() == Some("search")) {
+									log::warn!("relay does not advertise 'search'");
+								}
+								if !types.iter().any(|t| t.as_str() == Some(REQUEST_TYPE)) {
+									log::error!(
+										"relay does not support the '{REQUEST_TYPE}' request type; it needs \
+										 the foundryvtt-rest-api-relay fork patch"
+									);
 								}
 							}
 							if !value
@@ -308,6 +312,7 @@ impl Relay {
 	async fn teardown(&self) {
 		let was_connected = self.connected.swap(false, Ordering::Relaxed);
 		*self.tx.lock().await = None;
+		*self.companion.write().await = None;
 		let drained: Vec<_> = self.pending.lock().await.drain().collect();
 		if !drained.is_empty() {
 			log::debug!("relay dropped {} in-flight request(s)", drained.len());
@@ -317,7 +322,12 @@ impl Relay {
 		}
 	}
 
-	pub async fn request(&self, kind: &str, mut params: Value) -> Result<Value, RelayError> {
+	pub async fn request(
+		&self,
+		kind: &str,
+		mut params: Value,
+		timeout: Duration,
+	) -> Result<Value, RelayError> {
 		let _permit = self
 			.inflight
 			.acquire()
@@ -341,7 +351,7 @@ impl Relay {
 			return Err(RelayError::Disconnected);
 		}
 
-		match tokio::time::timeout(REQUEST_TIMEOUT, orx).await {
+		match tokio::time::timeout(timeout, orx).await {
 			Ok(Ok(value)) => {
 				if let Some(error) = value.get("error").and_then(Value::as_str) {
 					return Err(RelayError::Remote(error.to_string()));
@@ -356,21 +366,20 @@ impl Relay {
 		}
 	}
 
-	pub async fn execute_js(&self, script: String) -> Result<Value, RelayError> {
+	pub async fn call(
+		&self,
+		action: &str,
+		args: Value,
+		timeout: Duration,
+	) -> Result<Value, RelayError> {
 		let reply = self
-			.request("execute-js", json!({ "script": script }))
+			.request(
+				REQUEST_TYPE,
+				json!({ "action": action, "args": args }),
+				timeout,
+			)
 			.await?;
-		match reply.get("success").and_then(Value::as_bool) {
-			Some(true) => Ok(reply.get("result").cloned().unwrap_or(Value::Null)),
-			Some(false) => Err(RelayError::Remote(
-				reply
-					.get("error")
-					.and_then(Value::as_str)
-					.unwrap_or("execute-js failed")
-					.to_string(),
-			)),
-			None => Err(RelayError::Remote("malformed execute-js reply".to_string())),
-		}
+		Ok(reply.get("result").cloned().unwrap_or(Value::Null))
 	}
 
 	pub async fn search_actors(&self) -> Result<Vec<ActorRef>, RelayError> {
@@ -384,6 +393,7 @@ impl Relay {
 					"minified": true,
 					"limit": 500,
 				}),
+				REQUEST_TIMEOUT,
 			)
 			.await?;
 

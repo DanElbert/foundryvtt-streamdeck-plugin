@@ -208,8 +208,7 @@ impl Condition {
 			return;
 		}
 
-		let script = foundry::condition_art_script(&key.id, &key.accent, OFFLINE_COLOR);
-		let result = self.relay.execute_js(script).await;
+		let result = foundry::condition_art(&self.relay, &key.id, &key.accent, OFFLINE_COLOR).await;
 		self.state.inflight.lock().await.remove(&key);
 
 		match result {
@@ -312,11 +311,7 @@ impl Action for Condition {
 			return instance.show_alert().await;
 		}
 
-		match self
-			.relay
-			.execute_js(foundry::toggle_condition_script(id))
-			.await
-		{
+		match foundry::toggle_condition(&self.relay, id).await {
 			Ok(value) => match value.get("error").and_then(Value::as_str) {
 				Some(error) => {
 					log::warn!("toggle condition {id} failed: {error}");
@@ -348,7 +343,7 @@ impl Action for Condition {
 	) -> OpenActionResult<()> {
 		match payload.get("event").and_then(Value::as_str) {
 			Some("getConditions") => {
-				let reply = match self.relay.execute_js(foundry::conditions_script()).await {
+				let reply = match foundry::conditions(&self.relay).await {
 					Ok(value) => {
 						match (value.get("error").and_then(Value::as_str), value.as_array()) {
 							(Some(error), _) => json!({

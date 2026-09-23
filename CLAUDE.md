@@ -13,7 +13,7 @@ scaffold: one Counter action plus a minimal property inspector. No Foundry integ
 | `src/main.rs` | Wiring only: logger, config, relay + companion-event loop spawn, session start/end repaint tasks, `set_global_event_handler`, `register_action`, `run`. |
 | `src/config.rs` | `Config`, env fallback, redaction. Hand-written `Debug` — never derive it, it holds the API key. |
 | `src/relay.rs` | Relay WebSocket client: auth, reconnect, request correlation. |
-| `src/foundry.rs` | The `execute-js` script builders. Kept separate so they can be reviewed, and pasted into a Foundry console, without digging through handler logic. |
+| `src/foundry.rs` | Typed wrappers for the companion API over the `streamdeck` request type — the whole plugin→Foundry surface in one place. No JavaScript lives in the plugin. |
 | `src/image.rs` | Generic `TtlCache` (TTL 10 min, LRU 32), token-art and condition-art entry types, and the SVG-wrapper fallback. |
 | `src/counter.rs` | Scaffold action. |
 | `src/sheet.rs` | Sheet-toggle action and its instance mirror. |
@@ -205,16 +205,33 @@ Not built yet, but these shape decisions already made:
 
 ## The sheet action
 
-### Prerequisites in Foundry
+### Requests go through the companion, not `execute-js`
 
-`allowExecuteJs` must be **on** — there is no sheet open/close action anywhere in the relay or the
-REST module, so `execute-js` is the only route for toggles and artwork. `notifyOnExecuteJs` should be
-**off**, or every press and art fetch whispers the GM; the resync logs a warning when it is on but
-disables nothing, since there is no longer a recurring call to protect against.
+Every plugin→Foundry call is `{"type":"streamdeck","action":…,"args":[…]}` (`Relay::call`, wrapped
+per action in `foundry.rs`). The companion module registers a handler for that type on the REST
+module's socket and dispatches `action` to its API; the reply is
+`{"type":"streamdeck-result","result":…}`, or a top-level `error` for an unknown or throwing action.
+See the module's `CLAUDE.md` for the handler and for the ported toggle/art logic.
 
-The companion module `foundryvtt-streamdeck` (`../foundryvtt-streamdeck-module`) is **required** for
-externally-caused changes. There is no polling fallback: without it, state only changes on presses,
-art fetches and the per-session resync, and the resync logs a warning.
+- **Requires the relay fork patch:** the stock relay rejects request types missing from its
+  hardcoded `PendingRequestTypes` (`go-relay/internal/ws/pending.go`), which is also what routes
+  `<type>-result` replies. The welcome frame's `supportedTypes` is checked, and a
+  `Remote("Unknown message type…")` from the sync logs the same fork-patch error.
+- **Two error layers:** a top-level `error` is a `RelayError::Remote` (transport/dispatch); an
+  `error` *inside* `result` is a domain answer like `{error:"no selection"}`, checked at each call site.
+- **Companion missing = no reply at all** — the REST module just debug-logs an unhandled type. So
+  `foundry::sync` uses `SYNC_TIMEOUT` (5 s) and a timeout there means "companion missing"; everything
+  else uses the 25 s `REQUEST_TIMEOUT`. `relay.companion()` is cleared in `teardown`, set by the sync,
+  and also set by a pushed `snapshot` event carrying `version`, so enabling the module later is
+  picked up without a reconnect.
+- **Presses don't wait 25 s for a missing companion.** Sheet presses (and initiative presses during
+  a combat) call `foundry::companion_ready`, which re-probes with the 5 s sync when the companion is
+  unknown; a slow GM browser therefore self-heals instead of locking presses out. Condition and
+  no-combat initiative presses already alert locally, because their pushed state is empty.
+- *Allow Execute JavaScript* can be **off**, and *Notify on Execute JS* no longer matters.
+
+The companion module `foundryvtt-streamdeck` (`../foundryvtt-streamdeck-module`) is **required**: it
+answers every request and pushes every state change. There is no fallback.
 
 ### Sheet state is pushed, not polled
 
@@ -231,9 +248,8 @@ has never heard of. Here:
   filter server-side (the relay's `AddWSEventFunc` ignores `filters`).
 - Payloads are `{event:"sheet", uuid, open}` and `{event:"snapshot", open:[uuid...]}`. A snapshot is
   the complete set: `apply_snapshot` **replaces** `open`, so anything absent is closed.
-- `resync` is the one `execute-js` per session: it reads `notifyOnExecuteJs`, whether the companion
-  is active (its version is shown in the PI), and `api.snapshot()`. It also runs if the broadcast
-  receiver lags.
+- `resync` is the one `snapshot` request per session: companion version (shown in the PI), open
+  sheets, selection and combat. It also runs if the broadcast receiver lags.
 - A GM browser reload closes every sheet while *our* relay session stays up, so `resync` never
   runs. The companion covers it by emitting a snapshot on `foundry-rest-api.relayConnected`.
 
@@ -244,57 +260,20 @@ has never heard of. Here:
 `InstanceId -> SheetSettings` map, maintained in `will_appear` / `did_receive_settings` /
 `will_disappear`. Removing it silently breaks `repaint_visible`, so pushed events repaint nothing.
 
-### `_sheet`, not `sheet`, when only reading state
+### Sheet toggle and artwork live in the companion
 
-`actor.sheet` *constructs* an Application on first access (`client-document.mjs:213-231`). Reading
-state through it would instantiate a sheet just to ask whether it is open. The art script's `isOpen` probe is
-`!!(a._sheet && a._sheet.rendered)`; `_sheet` is only nulled in `_onSheetChange`, never by `close()`.
-The toggle script uses `a.sheet` deliberately, because there it *wants* the construction.
+`toggleSheet` and `actorArt` used to be JavaScript strings built here; they are now companion API
+functions, and their load-bearing details (`render({force:true})`, re-reading `.rendered`, `_sheet`
+vs `sheet`, blob-URL drawing, wildcard/video handling, the S3 CORS limitation) are documented in the
+module's `CLAUDE.md`. What still matters on this side:
 
-### The toggle script's load-bearing details
-
-- `render({force: true})` — `force` is mandatory. A bare `render()` silently no-ops on a closed
-  ApplicationV2 and still resolves (`application.mjs:520-521`).
-- `close({animate: false})` skips a ~1 s transition.
-- **`.rendered` is re-read after the await.** `DocumentSheetV2#_canRender` throws on missing view
-  permission, `#render` catches it, warns, and resolves normally — so resolution is not proof of
-  opening. The re-read value is what makes the response authoritative.
-- `minimized` is ignored: a minimized sheet reports `rendered === true`, which is the correct
-  reading of "is this on screen".
-- Scripts are spliced into `eval("(async () => { ... })()")`, so they are in **statement position**
-  and need an explicit `return`.
-- Return **plain JSON only**. A Document or Application makes the module's `JSON.stringify` throw
-  inside `send()`, which swallows it — you get no response at all and a silent 30 s timeout.
-- `execute-js` is sent with **no `userId`**. Supplying one activates the `codeExecutionPermission`
-  role check; omitting it skips that while `allowExecuteJs` still applies.
-
-### Artwork is fetched and drawn inside Foundry
-
-The `execute-js` art script fetches the token image, draws it letterboxed into a 144x144 canvas, and
-returns three `image/webp` data URLs — closed (no border), open (border), offline (grey border).
-
-- **The border is drawn in the browser, not composited in Rust and not overlaid with SVG.** That
-  removes any dependency on webkit2gtk rendering a `data:` URI nested inside an SVG `data:` URI,
-  which cannot be verified without hardware.
-- **Rust never decodes an image.** OpenDeck's webview decodes whatever we send, so `.webp`, `.png`
-  and `.svg` token art all work. Compositing in Rust would need `image` *and* resvg, because
-  Foundry's `DEFAULT_TOKEN` is an SVG.
-- **Drawing from a `blob:` URL makes canvas tainting impossible** — blob URLs are same-origin
-  whatever the source. A cross-origin S3 asset fails at `fetch` with a catchable error instead of a
-  `SecurityError` at `toDataURL`.
-- Downscaling in Foundry caps the payload at ~15 KB per variant instead of a multi-MB base64, and
-  fixes aspect ratio at the source so OpenDeck's non-aspect-preserving `drawImage` is a no-op.
-- `prototypeToken.texture.src` is the default. **`getPreferredArtwork()` is opt-in, not the
-  default**, because it returns `showTokenPortrait ? texture : this.img` — i.e. the *portrait*
-  unless that dnd5e flag is set.
-- Wildcard `randomImg` srcs resolve via `getTokenImages()` then `.sort()[0]` — deterministic on
-  purpose; a random pick would change the button image on every refetch and look like a bug.
-- Video srcs are legal on `texture.src` (not on `img`) and fall back to the portrait.
-
-**Known limitation:** cross-origin S3-hosted art is unreachable by *any* route, because the relay's
-HTTP `GET /download` is itself a `fetch` + `FileReader` in the same browser
-(`fileSystem.ts:315-327`). Falls back to the portrait, then to the manifest default. The fix is CORS
-headers on the bucket.
+- **Rust never decodes an image.** `actorArt` returns three 144² `image/webp` data URLs — closed,
+  open (border), offline (grey border) — and OpenDeck's webview decodes whatever we pass to
+  `set_image`. Compositing here would need `image` *and* resvg, because Foundry's `DEFAULT_TOKEN` is
+  an SVG.
+- The border is drawn in the browser, not overlaid with SVG here, which avoids depending on
+  webkit2gtk rendering a `data:` URI nested inside an SVG `data:` URI (unverifiable without hardware).
+  The `Indicator::Svg` option still does exactly that, as an opt-in.
 
 ### Relay client
 
@@ -302,7 +281,8 @@ headers on the bucket.
 - The connection task owns the whole `WebSocketStream` and drives reads and writes in one `select!`.
   **Do not `split()` it.** The relay pings every 20 s and tungstenite's auto-Pong needs the write
   half to flush; single ownership makes that guaranteed rather than something to reason about.
-- Client timeout is 25 s, inside the relay's 30 s, so our error surfaces first.
+- Request timeout is 25 s (`REQUEST_TIMEOUT`), inside the relay's 30 s, so our error surfaces
+  first; `Relay::request` takes it as a parameter so the companion sync can use 5 s.
 - On disconnect, `pending` is drained so in-flight callers fail immediately instead of waiting out
   the timeout, and the **token** art cache is cleared on the next session start because a new session
   may be a different world. Condition art is kept: it depends only on the game system.
@@ -387,18 +367,18 @@ a Rust repo):
 |---|---|
 | `mock-host.mjs` | The counter transcript. Ignores `getGlobalSettings`/`setGlobalSettings` so plugin-level frames don't shift its sequential assertions. |
 | `sheet-test.mjs` | Mock OpenDeck **and** mock relay: auth, art fetch, toggle both ways, cache, PI round trips, ping/pong. Predates push; its polling assertions are stale. |
-| `sheet-failures.mjs` | `execute-js` disabled, disconnect and reconnect. Predates push; its fail-closed assertions are stale. |
+| `sheet-failures.mjs` | Disconnect and reconnect. Predates push and the `streamdeck` request type; stale. |
 | `harness.mjs` | Shared RFC 6455 server/frame helpers imported by the two below. |
-| `push-test.mjs` | `subscribe` `hooks` right after auth, exactly one `execute-js` per session, snapshot paints, pushed `sheet` repaints, firehose/duplicate events ignored, **zero `execute-js` over a 15 s idle**, empty snapshot closes all, toggle still works, reconnect with companion missing warns, PI shows `companion` and no `pollMs`. Also checks the legacy `.sheet` hook name is ignored. |
+| `push-test.mjs` | `subscribe` `hooks` right after auth, exactly one `streamdeck` request (sync) per session, snapshot paints, pushed `sheet` repaints, firehose/duplicate events ignored, **zero requests over a 15 s idle**, empty snapshot closes all, toggle still works, art refetched after reconnect, unanswered sync → companion missing after 5 s, PI shows `companion: null`, a press then alerts after one 5 s probe, a `snapshot` event with `version` restores it, an unpatched relay logs the fork-patch error, and **no `execute-js` frame is ever sent**. Also checks the legacy `.sheet` hook name is ignored. |
 | `condition-test.mjs` | Condition action: `Pick condition` title, `none` with no selection and a press that alerts without toggling, on/off/mixed from pushed selections, implied status shows on, unchanged selection doesn't repaint, press sends `toggleCondition` and does **not** repaint by itself, Foundry-side error alerts, `getConditions` PI round trip, shared connection state, relay drop repaints `offline`, art cached per condition. |
-| `initiative-test.mjs` | Initiative action: dim swords + alert with no execute-js when nothing is selected, `Start (N)`, press sends `startCombat()` without repainting, combat push fetches the combatant's art and titles `Name\nR1`, press toggles their sheet (open border), a pushed sheet close repaints it, turn change, unstarted combat drops the round, `Empty` combat alerts, relay drop → offline, art fetched once. |
-| `module-unit.mjs` | The companion module's `main.mjs` imported under stubbed `Hooks`/`game`/`canvas`/`CONFIG`/`Combat`/`TokenDocument`: condition filtering, selection dedupe, change-only emits, tri-state toggle, `startCombat` call order and refusals, `turns[0]` fallback, combat change-only emit and `null` on delete. |
+| `initiative-test.mjs` | Initiative action: dim swords + alert with no request when nothing is selected, `Start (N)`, press sends `startCombat()` without repainting, combat push fetches the combatant's art and titles `Name\nR1`, press toggles their sheet (open border), a pushed sheet close repaints it, turn change, unstarted combat drops the round, `Empty` combat alerts, relay drop → offline, art fetched once. |
+| `module-unit.mjs` | The companion module's `main.mjs` imported under stubbed `Hooks`/`game`/`canvas`/`CONFIG`/`Combat`/`TokenDocument`: condition filtering, selection dedupe, change-only emits, tri-state toggle, `startCombat` call order and refusals, `turns[0]` fallback, combat change-only emit and `null` on delete, `streamdeck` handler registration on `ready`/`relayConnected`, dispatch envelope (result vs top-level error, requestId echo), `toggleSheet` open/close/refused, snapshot event `version`. |
 
 Assertions compare **parsed, key-sorted** objects — `set_settings`/`set_image` serialize through
 maps, so key order is alphabetical rather than declaration order.
 
 Two harness lessons worth keeping: waits must **filter by frame kind**, because art fetches and
-toggles interleave `execute-js` frames into the relay inbox and a naive "next frame" consumes the
+toggles interleave `streamdeck` request frames into the relay inbox and a naive "next frame" consumes the
 wrong one; and the mock relay must stay **self-consistent** — its snapshot, art `isOpen` and toggle
 answers must agree, or a later answer legitimately contradicts an earlier one.
 
