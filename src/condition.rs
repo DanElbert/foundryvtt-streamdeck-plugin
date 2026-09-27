@@ -6,7 +6,7 @@ use crate::relay::Relay;
 
 use openaction::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -343,24 +343,11 @@ impl Action for Condition {
 	) -> OpenActionResult<()> {
 		match payload.get("event").and_then(Value::as_str) {
 			Some("getConditions") => {
-				let reply = match foundry::conditions(&self.relay).await {
-					Ok(value) => {
-						match (value.get("error").and_then(Value::as_str), value.as_array()) {
-							(Some(error), _) => json!({
-								"event": "conditions", "status": "error", "message": error,
-							}),
-							(None, Some(list)) => json!({
-								"event": "conditions", "status": "ok", "conditions": list,
-							}),
-							(None, None) => json!({
-								"event": "conditions", "status": "error", "message": "malformed reply",
-							}),
-						}
-					}
-					Err(error) => json!({
-						"event": "conditions", "status": "error", "message": error.to_string(),
-					}),
-				};
+				let reply = foundry::list_reply(
+					"conditions",
+					"conditions",
+					foundry::conditions(&self.relay).await,
+				);
 				let _ = instance.send_to_property_inspector(reply).await;
 			}
 			Some("refreshArt") => {

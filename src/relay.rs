@@ -2,7 +2,6 @@ use crate::config::{Config, redact};
 use crate::foundry::{EVENT_HOOK, REQUEST_TYPE};
 
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,12 +31,6 @@ impl std::fmt::Display for RelayError {
 			Self::Remote(m) => write!(f, "{m}"),
 		}
 	}
-}
-
-#[derive(Clone, Deserialize)]
-pub struct ActorRef {
-	pub uuid: String,
-	pub name: String,
 }
 
 pub struct Relay {
@@ -380,33 +373,5 @@ impl Relay {
 			)
 			.await?;
 		Ok(reply.get("result").cloned().unwrap_or(Value::Null))
-	}
-
-	pub async fn search_actors(&self) -> Result<Vec<ActorRef>, RelayError> {
-		let reply = self
-			.request(
-				"search",
-				json!({
-					"query": "",
-					"filter": "documentType:Actor",
-					"excludeCompendiums": true,
-					"minified": true,
-					"limit": 500,
-				}),
-				REQUEST_TIMEOUT,
-			)
-			.await?;
-
-		let mut actors: Vec<ActorRef> = reply
-			.get("results")
-			.and_then(Value::as_array)
-			.map(|rows| {
-				rows.iter()
-					.filter_map(|row| serde_json::from_value(row.clone()).ok())
-					.collect()
-			})
-			.unwrap_or_default();
-		actors.sort_by_key(|a| a.name.to_lowercase());
-		Ok(actors)
 	}
 }

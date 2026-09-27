@@ -6,6 +6,7 @@ mod events;
 mod foundry;
 mod image;
 mod initiative;
+mod macros;
 mod relay;
 mod sheet;
 
@@ -93,10 +94,16 @@ async fn main() {
 		condition: condition.state.clone(),
 		state: Arc::new(initiative::InitiativeState::default()),
 	};
+	let macros = macros::Macro {
+		relay: relay.clone(),
+		config: config.clone(),
+		state: Arc::new(macros::MacroState::default()),
+	};
 	let actions = events::Actions {
 		sheet: sheet.clone(),
 		condition: condition.clone(),
 		initiative: initiative.clone(),
+		macros: macros.clone(),
 	};
 
 	set_global_event_handler(Box::leak(Box::new(Handler {
@@ -116,6 +123,7 @@ async fn main() {
 			loop {
 				relay.session_started.notified().await;
 				actions.sheet.state.clear_art().await;
+				actions.macros.state.clear_art().await;
 				events::resync(actions.clone()).await;
 				actions.repaint_all().await;
 			}
@@ -138,6 +146,7 @@ async fn main() {
 	register_action(sheet.clone()).await;
 	register_action(condition.clone()).await;
 	register_action(initiative.clone()).await;
+	register_action(macros.clone()).await;
 
 	if let Err(error) = run(std::env::args().collect()).await {
 		log::error!("plugin exited: {error}");

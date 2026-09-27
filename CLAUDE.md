@@ -3,8 +3,8 @@
 Code-level notes for `foundryvtt-streamdeck-plugin`. User-facing docs live in `README.md`; the code
 itself is comment-free per workspace convention, so the non-obvious decisions are recorded here.
 
-An OpenAction plugin (OpenDeck / Tacto) written in Rust with the `openaction` crate. Currently a
-scaffold: one Counter action plus a minimal property inspector. No Foundry integration yet.
+An OpenAction plugin (OpenDeck / Tacto) written in Rust with the `openaction` crate: a Counter scaffold plus
+Actor Sheet, Condition, Initiative and Macro actions driven through the companion module.
 
 ## Layout
 
@@ -19,7 +19,8 @@ scaffold: one Counter action plus a minimal property inspector. No Foundry integ
 | `src/sheet.rs` | Sheet-toggle action and its instance mirror. |
 | `src/condition.rs` | Condition-toggle action, its instance mirror, current token selection. |
 | `src/initiative.rs` | Initiative action: combat state, start-combat press, current-combatant display via the sheet pipeline. |
-| `src/events.rs` | `Actions` (sheet + condition + initiative), the companion event loop and the per-session resync. |
+| `src/macros.rs` | Macro action (`macro` is a reserved word, hence the module name). |
+| `src/events.rs` | `Actions` (sheet + condition + initiative + macro), the companion event loop and the per-session resync. |
 | `src/connection.rs` | Connection state pushed to, and `setConnection` from, both actions' PIs. Global config, so one implementation. |
 | `assets/` | **Staging directory, not an installed path.** See below. |
 | `build.sh` | `cargo build` + assemble `dist/<uuid>.sdPlugin/` for hand-copying. |
@@ -353,7 +354,7 @@ even when `render({force:true})` was swallowed by a permission failure — it wo
 
 ### Property inspectors are per-action
 
-`pi.html` (counter), `pi-sheet.html` (sheet), `pi-condition.html` (condition) and `pi-initiative.html` (initiative) share no per-button
+`pi.html` (counter), `pi-sheet.html` (sheet), `pi-condition.html` (condition), `pi-initiative.html` (initiative) and `pi-macro.html` (macro) share no per-button
 fields, so each is self-contained with
 inline styles. A shared `pi.css` was considered and rejected: it adds an unverifiable stylesheet load
 path on a headless box for the sake of ~25 duplicated lines.
@@ -372,7 +373,8 @@ a Rust repo):
 | `push-test.mjs` | `subscribe` `hooks` right after auth, exactly one `streamdeck` request (sync) per session, snapshot paints, pushed `sheet` repaints, firehose/duplicate events ignored, **zero requests over a 15 s idle**, empty snapshot closes all, toggle still works, art refetched after reconnect, unanswered sync → companion missing after 5 s, PI shows `companion: null`, a press then alerts after one 5 s probe, a `snapshot` event with `version` restores it, an unpatched relay logs the fork-patch error, and **no `execute-js` frame is ever sent**. Also checks the legacy `.sheet` hook name is ignored. |
 | `condition-test.mjs` | Condition action: `Pick condition` title, `none` with no selection and a press that alerts without toggling, on/off/mixed from pushed selections, implied status shows on, unchanged selection doesn't repaint, press sends `toggleCondition` and does **not** repaint by itself, Foundry-side error alerts, `getConditions` PI round trip, shared connection state, relay drop repaints `offline`, art cached per condition. |
 | `initiative-test.mjs` | Initiative action: dim swords + alert with no request when nothing is selected, `Start (N)`, press sends `startCombat()` without repainting, combat push fetches the combatant's art and titles `Name\nR1`, press toggles their sheet (open border), a pushed sheet close repaints it, turn change, unstarted combat drops the round, `Empty` combat alerts, relay drop → offline, art fetched once. |
-| `module-unit.mjs` | The companion module's `main.mjs` imported under stubbed `Hooks`/`game`/`canvas`/`CONFIG`/`Combat`/`TokenDocument`: condition filtering, selection dedupe, change-only emits, tri-state toggle, `startCombat` call order and refusals, `turns[0]` fallback, combat change-only emit and `null` on delete, `streamdeck` handler registration on `ready`/`relayConnected`, dispatch envelope (result vs top-level error, requestId echo), `toggleSheet` open/close/refused, snapshot event `version`. |
+| `module-unit.mjs` | The companion module's `main.mjs` imported under stubbed `Hooks`/`game`/`canvas`/`CONFIG`/`Combat`/`TokenDocument`: condition filtering, selection dedupe, change-only emits, tri-state toggle, `startCombat` call order and refusals, `turns[0]` fallback, combat change-only emit and `null` on delete, `streamdeck` handler registration on `ready`/`relayConnected`, dispatch envelope (result vs top-level error, requestId echo), `toggleSheet` open/close/refused, snapshot event `version`, folder paths and ordering for `actors`/`macros`, `executeMacro` permission/not-a-macro refusals, replying without awaiting a hung script, async script failure to `Hooks.onError`. |
+| `macro-test.mjs` | Macro action: `Pick macro`, saved name before art, `showTitle:false`, press → `executeMacro` + `showOk`, domain error alerts, `getMacros` carries folders, sheet `getActors` comes from the companion (no `search` frame), `refreshArt`, offline repaint, art cleared and refetched per session. |
 
 Assertions compare **parsed, key-sorted** objects — `set_settings`/`set_image` serialize through
 maps, so key order is alphabetical rather than declaration order.
@@ -450,3 +452,21 @@ start/end tasks and the global-settings handler take one argument:
 | `sheet` / `snapshot` | sheet | sheet + initiative |
 | `selection` | condition | condition + initiative |
 | `combat` | initiative | initiative |
+
+## The macro action
+
+Stateless apart from art: nothing is pushed, so it takes no part in `event_loop` or `resync`.
+
+- `key_up` gates on `companion_ready` like the sheet action, sends `executeMacro`, and answers with
+  `show_ok` / `show_alert`. The companion replies once the macro has *started* (see its
+  `CLAUDE.md`), so OK does not mean the script succeeded.
+- Art is `TtlCache<String, MacroArt>` keyed by trimmed UUID, two variants (`ready`, `offline`), no
+  accent. It is cleared on session start alongside token art, since macro UUIDs are per-world.
+- The PI has no border-colour field; `setConnection` only overwrites fields present, so that's safe.
+
+## Dropdown lists
+
+The sheet and macro PIs fill their `<select>` from the companion's `actors` / `macros`, whose
+entries carry a `folder` path; `fillGrouped` (duplicated in both PIs, per the no-shared-PI-code rule)
+makes one `<optgroup>` per path. `foundry::list_reply` builds the `{event, status, <key>: list}`
+reply for these and for `getConditions`. The REST module's `search` request is no longer used.

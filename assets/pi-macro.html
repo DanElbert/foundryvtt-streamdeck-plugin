@@ -88,8 +88,8 @@
 
 	<body>
 		<div class="field">
-			<label for="actor">Actor</label>
-			<select id="actor">
+			<label for="macro">Macro</label>
+			<select id="macro">
 				<option value="">(none)</option>
 			</select>
 			<div class="row">
@@ -97,25 +97,20 @@
 				<button id="refresh" type="button">Refresh art</button>
 				<span id="status"></span>
 			</div>
+			<p class="hint">
+				Runs the macro in the GM's browser, with the tokens selected there as its
+				<code>token</code>/<code>actor</code>.
+			</p>
 		</div>
 
 		<div class="field">
-			<label for="uuid">Actor UUID (manual)</label>
-			<input id="uuid" type="text" placeholder="Actor.xxxxxxxxxxxx" />
-		</div>
-
-		<div class="field">
-			<label for="art">Artwork</label>
-			<select id="art">
-				<option value="token">Token</option>
-				<option value="portrait">Portrait</option>
-				<option value="preferred">System preferred</option>
-			</select>
+			<label for="uuid">Macro UUID (manual)</label>
+			<input id="uuid" type="text" placeholder="Macro.xxxxxxxxxxxx" />
 		</div>
 
 		<div class="field inline">
 			<input id="showTitle" type="checkbox" />
-			<label for="showTitle" style="margin: 0">Show actor name</label>
+			<label for="showTitle" style="margin: 0">Show macro name</label>
 		</div>
 
 		<details>
@@ -137,18 +132,6 @@
 				Requires the Stream Deck Companion module (foundryvtt-streamdeck) enabled in the
 				world and the patched relay. "Allow Execute JavaScript" can stay off.
 			</p>
-			<div class="field">
-				<label for="indicator">Open indicator</label>
-				<select id="indicator">
-					<option value="border">Coloured border</option>
-					<option value="svg">Border via SVG overlay</option>
-					<option value="title">Title marker</option>
-				</select>
-			</div>
-			<div class="field">
-				<label for="borderColor">Border colour</label>
-				<input id="borderColor" type="color" />
-			</div>
 			<div class="row">
 				<button id="saveConn" type="button">Save connection</button>
 			</div>
@@ -169,21 +152,19 @@
 					websocket.send(JSON.stringify({ event: "sendToPlugin", context, action, payload }));
 
 				const paint = () => {
-					if (idle(el("actor"))) el("actor").value = settings.actorUuid ?? "";
-					if (idle(el("uuid"))) el("uuid").value = settings.actorUuid ?? "";
-					if (idle(el("art"))) el("art").value = settings.artSource ?? "token";
+					if (idle(el("macro"))) el("macro").value = settings.macroUuid ?? "";
+					if (idle(el("uuid"))) el("uuid").value = settings.macroUuid ?? "";
 					if (idle(el("showTitle"))) el("showTitle").checked = settings.showTitle !== false;
 				};
 
 				const commit = () => {
-					settings.artSource = el("art").value;
 					settings.showTitle = el("showTitle").checked;
 					websocket.send(JSON.stringify({ event: "setSettings", context, payload: settings }));
 				};
 
-				const pickActor = (uuid, name) => {
-					settings.actorUuid = (uuid ?? "").trim();
-					if (name !== undefined) settings.actorName = name ?? "";
+				const pickMacro = (uuid, name) => {
+					settings.macroUuid = (uuid ?? "").trim();
+					if (name !== undefined) settings.macroName = name ?? "";
 					commit();
 				};
 
@@ -215,7 +196,7 @@
 				websocket.onopen = () => {
 					websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inPropertyInspectorUUID }));
 					toPlugin({ event: "getConnection" });
-					toPlugin({ event: "getActors" });
+					toPlugin({ event: "getMacros" });
 				};
 
 				websocket.onmessage = (event) => {
@@ -229,20 +210,20 @@
 					if (data.event !== "sendToPropertyInspector") return;
 					const p = data.payload ?? {};
 
-					if (p.event === "actors") {
-						const sel = el("actor");
+					if (p.event === "macros") {
+						const sel = el("macro");
 						sel.innerHTML = "";
 						sel.appendChild(new Option("(none)", ""));
-						const list = p.actors ?? [];
+						const list = p.macros ?? [];
 						if (p.status === "ok") {
 							fillGrouped(sel, list);
-							el("status").textContent = list.length + " actors";
+							el("status").textContent = list.length + " macros";
 						} else {
 							el("status").textContent = p.message || "unavailable";
 						}
-						if (settings.actorUuid && !list.some((a) => a.uuid === settings.actorUuid)) {
-							const label = (settings.actorName || settings.actorUuid) + " (saved)";
-							sel.appendChild(new Option(label, settings.actorUuid));
+						if (settings.macroUuid && !list.some((m) => m.uuid === settings.macroUuid)) {
+							const label = (settings.macroName || settings.macroUuid) + " (saved)";
+							sel.appendChild(new Option(label, settings.macroUuid));
 						}
 						paint();
 					}
@@ -250,8 +231,6 @@
 					if (p.event === "connection") {
 						if (idle(el("relayUrl"))) el("relayUrl").value = p.relayUrl ?? "";
 						if (idle(el("clientId"))) el("clientId").value = p.clientId ?? "";
-						if (idle(el("indicator"))) el("indicator").value = p.indicator ?? "border";
-						if (idle(el("borderColor"))) el("borderColor").value = p.borderColor ?? "#ff6400";
 						el("apiKey").placeholder = p.hasApiKey ? "(unchanged)" : "(required)";
 						el("resolved").textContent = p.resolvedClientId
 							? "relay resolved: " + p.resolvedClientId
@@ -264,14 +243,13 @@
 					}
 				};
 
-				el("actor").addEventListener("change", () =>
-					pickActor(el("actor").value, el("actor").selectedOptions[0]?.textContent),
+				el("macro").addEventListener("change", () =>
+					pickMacro(el("macro").value, el("macro").selectedOptions[0]?.textContent),
 				);
-				el("uuid").addEventListener("input", () => debounce(() => pickActor(el("uuid").value)));
-				el("uuid").addEventListener("change", () => pickActor(el("uuid").value));
-				el("art").addEventListener("change", commit);
+				el("uuid").addEventListener("input", () => debounce(() => pickMacro(el("uuid").value)));
+				el("uuid").addEventListener("change", () => pickMacro(el("uuid").value));
 				el("showTitle").addEventListener("change", commit);
-				el("reload").addEventListener("click", () => toPlugin({ event: "getActors" }));
+				el("reload").addEventListener("click", () => toPlugin({ event: "getMacros" }));
 				el("refresh").addEventListener("click", () => toPlugin({ event: "refreshArt" }));
 				el("saveConn").addEventListener("click", () =>
 					toPlugin({
@@ -279,8 +257,6 @@
 						relayUrl: el("relayUrl").value.trim(),
 						clientId: el("clientId").value.trim(),
 						apiKey: el("apiKey").value,
-						indicator: el("indicator").value,
-						borderColor: el("borderColor").value,
 					}),
 				);
 

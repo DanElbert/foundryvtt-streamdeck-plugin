@@ -1,6 +1,7 @@
 use crate::condition::Condition;
 use crate::foundry;
 use crate::initiative::Initiative;
+use crate::macros::Macro;
 use crate::relay::RelayError;
 use crate::sheet::Sheet;
 
@@ -13,6 +14,7 @@ pub struct Actions {
 	pub sheet: Sheet,
 	pub condition: Condition,
 	pub initiative: Initiative,
+	pub macros: Macro,
 }
 
 impl Actions {
@@ -20,11 +22,13 @@ impl Actions {
 		self.sheet.repaint_visible().await;
 		self.condition.repaint_visible().await;
 		self.initiative.repaint_visible().await;
+		self.macros.repaint_visible().await;
 	}
 
 	pub async fn clear_art(&self) {
 		self.sheet.state.clear_art().await;
 		self.condition.state.clear_art().await;
+		self.macros.state.clear_art().await;
 	}
 
 	pub async fn push_connection_state_to_all(&self) {
@@ -37,6 +41,9 @@ impl Actions {
 		for instance in visible_instances(Initiative::UUID).await {
 			self.initiative.push_connection_state(&instance).await;
 		}
+		for instance in visible_instances(Macro::UUID).await {
+			self.macros.push_connection_state(&instance).await;
+		}
 	}
 }
 
@@ -45,6 +52,7 @@ pub async fn event_loop(actions: Actions) {
 		sheet,
 		condition,
 		initiative,
+		..
 	} = &actions;
 	let mut events = sheet.relay.events.subscribe();
 	loop {
@@ -97,6 +105,7 @@ pub async fn resync(actions: Actions) {
 		sheet,
 		condition,
 		initiative,
+		..
 	} = &actions;
 	let value = match foundry::sync(&sheet.relay).await {
 		Ok(value) => value,

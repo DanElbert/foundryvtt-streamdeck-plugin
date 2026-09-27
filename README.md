@@ -3,16 +3,16 @@
 An [OpenAction](https://openaction.amankhanna.me/) plugin for stream controller devices, built with
 the `openaction` Rust crate. Runs under [OpenDeck](https://github.com/nekename/OpenDeck) or Tacto.
 
-Four actions: a **Counter** scaffold, an **Actor Sheet** button that toggles a character sheet
+Five actions: a **Counter** scaffold, an **Actor Sheet** button that toggles a character sheet
 open and closed in Foundry and shows that actor's token artwork, a **Condition** button that
-shows and toggles a condition on the selected tokens, and an **Initiative** button that starts
-combat and then follows whose turn it is.
+shows and toggles a condition on the selected tokens, an **Initiative** button that starts
+combat and then follows whose turn it is, and a **Macro** button that runs a Foundry macro.
 
 ## Requirements
 
 - Rust (stable)
 - OpenDeck
-- For the Actor Sheet, Condition and Initiative actions: a Foundry world (dnd5e, for conditions) running the
+- For the Actor Sheet, Condition, Initiative and Macro actions: a Foundry world (dnd5e, for conditions) running the
   [REST API module](https://github.com/ThreeHats/foundryvtt-rest-api), paired with a relay, a
   relay API key, and the
   [Stream Deck Companion module](https://github.com/DanElbert/foundryvtt-streamdeck-module)
@@ -78,8 +78,8 @@ Without the companion module enabled, the plugin logs a warning, the property in
 ### Plugin setup
 
 Open the button's property inspector and expand **Relay connection** (shared by every button):
-relay URL, client ID and API key. Then pick an actor from the dropdown, or paste an
-`Actor.xxxxxxxx` UUID directly if the list is unavailable.
+relay URL, client ID and API key. Then pick an actor from the dropdown (grouped by the world's
+actor folders), or paste an `Actor.xxxxxxxx` UUID directly if the list is unavailable.
 
 **Artwork** chooses between the token image, the portrait, or whatever the game system prefers.
 Token is the default.
@@ -136,6 +136,17 @@ has been set up but not started shows the first combatant in the tracker, withou
 
 The key never ends or advances a combat; do that in the tracker. The *Show combatant name* option
 hides the name but keeps the round.
+
+## The Macro action
+
+Pick a macro from the dropdown (grouped by the world's macro folders; only macros the GM's browser
+may run are listed), or paste a UUID — including a `Compendium.…` one — into the manual field. The
+key shows the macro's icon and name; press it to run the macro in the GM's browser. The key
+flashes OK once the macro has *started*, and the alert if it couldn't be found or run. Script
+macros see the tokens selected there as `token` / `actor`, exactly as when run from the hotbar.
+
+A macro that throws shows its error as a notification in Foundry, not on the deck. Changes to a
+macro's name or icon show up after a reconnect, or at once with **Refresh art**.
 
 ## Logs
 

@@ -54,6 +54,13 @@ pub struct ConditionArt {
 	pub offline: String,
 }
 
+#[derive(Clone)]
+pub struct MacroArt {
+	pub name: String,
+	pub ready: String,
+	pub offline: String,
+}
+
 pub struct TtlCache<K, V> {
 	entries: RwLock<HashMap<K, (V, Instant)>>,
 	order: RwLock<Vec<K>>,
