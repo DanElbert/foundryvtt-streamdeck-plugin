@@ -3,8 +3,8 @@
 Code-level notes for `foundryvtt-streamdeck-plugin`. User-facing docs live in `README.md`; the code
 itself is comment-free per workspace convention, so the non-obvious decisions are recorded here.
 
-An OpenAction plugin (OpenDeck / Tacto) written in Rust with the `openaction` crate: a Counter scaffold plus
-Actor Sheet, Condition, Initiative and Macro actions driven through the companion module.
+An OpenAction plugin (OpenDeck / Tacto) written in Rust with the `openaction` crate: a standalone Counter
+plus Actor Sheet, Condition, Initiative and Macro actions driven through the companion module.
 
 ## Layout
 
@@ -15,7 +15,7 @@ Actor Sheet, Condition, Initiative and Macro actions driven through the companio
 | `src/relay.rs` | Relay WebSocket client: auth, reconnect, request correlation. |
 | `src/foundry.rs` | Typed wrappers for the companion API over the `streamdeck` request type — the whole plugin→Foundry surface in one place. No JavaScript lives in the plugin. |
 | `src/image.rs` | Generic `TtlCache` (TTL 10 min, LRU 32), token-art and condition-art entry types, and the SVG-wrapper fallback. |
-| `src/counter.rs` | Scaffold action. |
+| `src/counter.rs` | Counter action: short/long press, per-press action + step, reset-to-start. |
 | `src/sheet.rs` | Sheet-toggle action and its instance mirror. |
 | `src/condition.rs` | Condition-toggle action, its instance mirror, current token selection. |
 | `src/initiative.rs` | Initiative action: combat state, start-combat press, current-combatant display via the sheet pipeline. |
@@ -63,8 +63,18 @@ frozen.
 
 `convert_icon` probes `path + ".svg"`, then `path + "@2x.png"`, then `path + ".png"`. Hence
 extension-less `"Icon": "icon"` in the manifest resolving to `icon.svg`. One file serves the plugin
-`Icon`, `CategoryIcon`, the action `Icon`, and the state `Image` (`"actionDefaultImage"` is
-special-cased to reuse the action icon).
+`Icon`, `CategoryIcon` and most action `Icon`s; a state `Image` of `"actionDefaultImage"` is
+special-cased to reuse the action icon, anything else is `plugin_dir.join(image)` through the same
+`convert_icon`. The counter uses that split: `"Icon": "icon"` keeps the bright mark in the action
+list while its state `Image` is the muted `counter.svg` (hex outline at 35 %, no fill) so the
+title text stays readable on the key.
+
+**Title font size is a manifest state field, not a protocol call.** OpenDeck's frontend composites
+the title onto the image on a canvas in the webview and ships a JPEG to the device; `setTitle` only
+carries text. `ActionState` deserialises the Elgato state keys (`FontSize`, `TitleAlignment`,
+`TitleColor`, `FontFamily`, `ShowTitle`) via serde aliases, default size 16. The counter sets
+`"FontSize": 20`. Placing a key copies the manifest states into the profile, so keys placed before
+a `FontSize` change keep the old size until re-placed or edited in OpenDeck's title panel.
 
 No `<text>` in the SVG: OpenDeck rasterises into a 144x144 canvas where font availability isn't
 guaranteed.
@@ -76,6 +86,9 @@ guaranteed.
 
 `#[serde(default)]` is at **container** level, not per field. Per-field would give `step: 0` — a
 counter that never counts. Container level routes missing fields through the manual `Default` impl.
+That is also the whole migration story for keys saved by older versions: `{step, value, label}`
+hydrates to short-press Step(`step`), long-press Reset, `start: 0`. The short-press step is still
+named `step` for that reason — renaming it would silently reset every configured key to 1.
 
 `setSettings` **replaces the entire settings object** for an instance. The property inspector
 therefore holds one `settings` object as its source of truth, mutates single fields, and re-sends
@@ -102,7 +115,28 @@ Three title-refresh points, all load-bearing:
 | `did_receive_settings` | makes property-inspector edits update the key live |
 | `key_up` | after incrementing |
 
-All `Action` methods have no-op defaults, so the three implemented here are the entire surface.
+`will_disappear` only aborts a pending long-press timer.
+
+### Long press
+
+openaction awaits every inbound event inline in one loop (`inbound/mod.rs`), so a `sleep` inside
+`key_down` would stall the matching `keyUp`. `key_down` therefore `tokio::spawn`s the 600 ms timer
+and parks a `Hold { claimed: Arc<AtomicBool>, task: JoinHandle }` in `Counter.holds`, keyed by
+instance id. The timer task snapshots the settings delivered with `keyDown` (an `Instance` can't
+read its own settings — `settings_json` is `pub(crate)`) and re-resolves the instance with
+`get_instance` after the sleep.
+
+Exactly one of timer / release wins, decided by `claimed.swap(true)` on both sides:
+
+- timer wakes, swap returns `false` → runs the long action, `show_ok`.
+- `key_up`, swap returns `false` → aborts the timer (still asleep, nothing to tear down) and runs
+  the short action.
+- `key_up`, swap returns `true` → the long action already fired; do nothing and **do not abort**,
+  the task may be mid-`set_settings`.
+
+A bare `keyUp` with no prior `keyDown` (the mock host does this) is a short press, so the original
+transcript still holds. `PressAction::Nothing` returns before `set_settings`, so it produces no
+frames at all.
 
 `register_action` must come **before** `run`; `run` blocks for the process lifetime. Logging goes
 to stdout with `ColorChoice::Never` because OpenDeck redirects plugin stdout/stderr into a log file,
@@ -166,11 +200,14 @@ It is kept out of the repo (it would be the only JS in a Rust project); the tran
 | 2 | host -> plugin | `willAppear`, `settings: {}` |
 | 3 | plugin -> host | `setTitle` `{"title":"0","state":null}` — empty settings hydrating to the struct default |
 | 4 | host -> plugin | `keyUp`, `settings: {step:1,value:0,label:""}` |
-| 5 | plugin -> host | `setSettings` `{step:1,value:1,...}` then `setTitle` `"1"` |
+| 5 | plugin -> host | `setSettings` `{step:1,value:1,label:"",start:0,short_action:"step",long_action:"reset",long_step:1}` then `setTitle` `"1"` |
 | 6 | host -> plugin | `didReceiveSettings`, `{step:5,value:1,label:"Initiative"}` |
 | 7 | plugin -> host | exactly one frame: `setTitle` `"Initiative\n1"`, and **no `setSettings`** |
 | 8 | host -> plugin | `keyUp` at `step:5` -> `value:6`, title `"Initiative\n6"` |
 | 9 | host -> plugin | `didReceiveSettings` with `label:"   "` -> title `"6"`, one line |
+| 10 | host -> plugin | `keyDown` then `keyUp` 100 ms later at `{step:2,value:6}` -> `setSettings` `value:8`, one `setTitle` |
+| 11 | host -> plugin | `keyDown` at `{value:8,start:3}`, nothing else -> ~600 ms later `setSettings` `value:3`, `setTitle` `"3"`, `showOk`; a following `keyUp` sends nothing |
+| 12 | host -> plugin | `keyDown` then `willDisappear` -> nothing, ever. openaction drops the instance on `willDisappear`, so the harness must send `willAppear` again before any further instance events |
 
 Inbound payloads are camelCase with `settings`, `coordinates: {row,column}`, `controller`, `state`,
 `isInMultiAction`; the inbound enum is `#[serde(tag = "event")]`, and `isInMultiAction` has no serde
@@ -297,10 +334,16 @@ resolves it when the field is blank — so `is_complete()` requires only URL and
 clientId is omitted from *both* the connect URL and the auth frame. The resolved value comes back in
 the `connected` frame and is surfaced in the inspector.
 
-**`set_global_settings` only sends.** Config is applied when the host echoes
-`didReceiveGlobalSettings`, which is also where the PI gets refreshed. Pushing connection state
-immediately after `set_global_settings` repaints the inspector from the *pre-write* config and makes
-the user's typing appear to vanish. `sheet-settings.mjs` regression-tests exactly this.
+**OpenDeck does not echo a plugin's own `setGlobalSettings` back to the plugin.** It writes the
+file and sends `didReceiveGlobalSettings` to the *property inspectors* only
+(`to_property_inspector = !from_property_inspector` in `events/inbound/settings.rs`). A plugin
+`getGlobalSettings`, by contrast, replies to the plugin. So `apply_set_connection` sends `set` then
+`get`: OpenDeck processes a socket's messages sequentially and syncs the file before returning, so
+the `get` reply carries the new config. Without the `get`, Save wrote the file but nothing applied
+until the plugin restarted — the mock harness hid this by echoing to the plugin. Config is still
+applied only in `did_receive_global_settings`, which also refreshes the PI. Pushing connection state
+immediately after the write repaints the inspector from the *pre-write* config and makes the
+user's typing appear to vanish. `sheet-settings.mjs` regression-tests exactly this.
 
 **`sendToPlugin` is routed by `(action, context)` against openaction's instance map**, so it is
 silently dropped if no `willAppear` has registered that instance. Harmless in real use (an inspector
@@ -308,7 +351,7 @@ only opens for a placed button) but it will bite any test harness.
 
 Connection config is **global**; actor binding is **per-instance**. `plugin_ready()` issues
 `get_global_settings()` and `did_receive_global_settings` is the single place config is mutated —
-`setConnection` from the PI writes and does nothing else, letting the host's echo apply it.
+`setConnection` from the PI writes and then re-reads, letting the reply apply it.
 
 `HasSettingsInterface` is **unusable from openaction**: OpenDeck sends
 `{"event":"showSettingsInterface"}` and openaction 2.7 has no handler for it, so the button would

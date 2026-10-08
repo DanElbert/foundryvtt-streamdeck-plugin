@@ -142,7 +142,7 @@ async fn main() {
 		});
 	}
 
-	register_action(counter::Counter).await;
+	register_action(counter::Counter::new()).await;
 	register_action(sheet.clone()).await;
 	register_action(condition.clone()).await;
 	register_action(initiative.clone()).await;

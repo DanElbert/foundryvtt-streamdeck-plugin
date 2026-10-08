@@ -2,7 +2,7 @@
 	"Name": "Foundry VTT",
 	"Description": "Stream Deck actions for Foundry VTT.",
 	"Author": "Dan Elbert",
-	"Version": "0.7.0",
+	"Version": "0.8.0",
 	"Icon": "icon",
 	"Category": "Foundry VTT",
 	"CategoryIcon": "icon",
@@ -28,8 +28,9 @@
 			"SupportedInMultiActions": true,
 			"States": [
 				{
-					"Image": "actionDefaultImage",
-					"Title": "0"
+					"Image": "counter",
+					"Title": "0",
+					"FontSize": 20
 				}
 			]
 		},

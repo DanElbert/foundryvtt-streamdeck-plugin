@@ -15,7 +15,8 @@
 				margin-bottom: 4px;
 				color: #969696;
 			}
-			input {
+			input,
+			select {
 				width: 100%;
 				box-sizing: border-box;
 				padding: 5px 6px;
@@ -27,6 +28,17 @@
 			.field + .field {
 				margin-top: 12px;
 			}
+			.press {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 8px;
+			}
+			.press.hidden-step {
+				grid-template-columns: 1fr;
+			}
+			.press.hidden-step .step {
+				display: none;
+			}
 		</style>
 	</head>
 
@@ -36,8 +48,30 @@
 			<input id="label" type="text" placeholder="(none)" />
 		</div>
 		<div class="field">
-			<label for="step">Step</label>
-			<input id="step" type="number" step="1" />
+			<label for="start">Start value</label>
+			<input id="start" type="number" step="1" />
+		</div>
+		<div class="field">
+			<label for="short_action">Short press</label>
+			<div class="press" id="short_press">
+				<select id="short_action">
+					<option value="step">Step</option>
+					<option value="reset">Reset</option>
+					<option value="nothing">Nothing</option>
+				</select>
+				<input class="step" id="step" type="number" step="1" title="Step" />
+			</div>
+		</div>
+		<div class="field">
+			<label for="long_action">Long press</label>
+			<div class="press" id="long_press">
+				<select id="long_action">
+					<option value="step">Step</option>
+					<option value="reset">Reset</option>
+					<option value="nothing">Nothing</option>
+				</select>
+				<input class="step" id="long_step" type="number" step="1" title="Step" />
+			</div>
 		</div>
 
 		<script>
@@ -47,17 +81,33 @@
 				const context = actionInfo.context;
 				let settings = actionInfo.payload.settings ?? {};
 
-				const labelInput = document.getElementById("label");
-				const stepInput = document.getElementById("step");
+				const fields = {
+					label: { el: document.getElementById("label"), read: (v) => v, fallback: "" },
+					start: { el: document.getElementById("start"), read: (v) => parseInt(v, 10) || 0, fallback: 0 },
+					short_action: { el: document.getElementById("short_action"), read: (v) => v, fallback: "step" },
+					step: { el: document.getElementById("step"), read: (v) => parseInt(v, 10) || 1, fallback: 1 },
+					long_action: { el: document.getElementById("long_action"), read: (v) => v, fallback: "reset" },
+					long_step: { el: document.getElementById("long_step"), read: (v) => parseInt(v, 10) || 1, fallback: 1 },
+				};
+				const groups = [
+					{ el: document.getElementById("short_press"), action: fields.short_action.el },
+					{ el: document.getElementById("long_press"), action: fields.long_action.el },
+				];
+
+				const layout = () => {
+					for (const group of groups) group.el.classList.toggle("hidden-step", group.action.value !== "step");
+				};
 
 				const paint = () => {
-					if (document.activeElement !== labelInput) labelInput.value = settings.label ?? "";
-					if (document.activeElement !== stepInput) stepInput.value = settings.step ?? 1;
+					for (const [key, field] of Object.entries(fields)) {
+						if (document.activeElement !== field.el) field.el.value = settings[key] ?? field.fallback;
+					}
+					layout();
 				};
 
 				const commit = () => {
-					settings.label = labelInput.value;
-					settings.step = parseInt(stepInput.value, 10) || 1;
+					for (const [key, field] of Object.entries(fields)) settings[key] = field.read(field.el.value);
+					layout();
 					websocket.send(JSON.stringify({ event: "setSettings", context, payload: settings }));
 				};
 
@@ -79,10 +129,10 @@
 					}
 				};
 
-				labelInput.addEventListener("input", debounced);
-				stepInput.addEventListener("input", debounced);
-				labelInput.addEventListener("change", commit);
-				stepInput.addEventListener("change", commit);
+				for (const field of Object.values(fields)) {
+					field.el.addEventListener("input", debounced);
+					field.el.addEventListener("change", commit);
+				}
 
 				paint();
 			}

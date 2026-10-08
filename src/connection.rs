@@ -48,8 +48,6 @@ pub async fn apply_set_connection(
 	if let Some(v) = payload.get("borderColor").and_then(Value::as_str) {
 		next.border_color = v.trim().to_string();
 	}
-	// Only send. The host echoes didReceiveGlobalSettings, which is the single
-	// place config is applied -- and which then pushes fresh state to the PI.
-	// Pushing here would repaint the inspector from the pre-write config.
-	set_global_settings(&next).await
+	set_global_settings(&next).await?;
+	get_global_settings().await
 }

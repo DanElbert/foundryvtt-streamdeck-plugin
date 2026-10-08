@@ -42,16 +42,28 @@ Only `x86_64-unknown-linux-gnu` is built.
 
 ## The Counter action
 
-Pressing the key increments a stored counter and writes the new value to the key's title.
+A per-key counter shown as the key's title. A short press and a long press (hold for about
+0.6 s) each do one of:
 
-The property inspector has two fields:
+- **Step** — add that press's own step amount (may be negative).
+- **Reset** — set the count back to the start value.
+- **Nothing**.
+
+Defaults: short press steps by 1, long press resets. A long press fires while the key is still
+held and flashes a checkmark; releasing afterwards does nothing extra.
+
+The property inspector has:
 
 - **Label** — optional text shown above the count. With a label set, the title is two lines
   (`label` then the count); with it empty, just the count. Editing it updates the key immediately
   without resetting the count.
-- **Step** — how much each press adds. Defaults to 1; may be negative.
+- **Start value** — what Reset returns to. Defaults to 0.
+- **Short press** / **Long press** — the action dropdown, plus a step amount when the action is
+  Step.
 
-Both are per-key settings, so the same action can appear on several keys with different values.
+All of these are per-key settings, so the same action can appear on several keys with different
+values. The number is drawn a little larger than OpenDeck's default title size; keys placed before
+this version keep their old size until re-placed or adjusted in OpenDeck's title settings.
 
 ## The Actor Sheet action
 
