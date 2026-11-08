@@ -12,13 +12,10 @@ combat and then follows whose turn it is, and a **Macro** button that runs a Fou
 
 - Rust (stable)
 - OpenDeck
-- For the Actor Sheet, Condition, Initiative and Macro actions: a Foundry world (dnd5e, for conditions) running the
-  [REST API module](https://github.com/ThreeHats/foundryvtt-rest-api), paired with a relay, a
-  relay API key, and the
-  [Stream Deck Companion module](https://github.com/DanElbert/foundryvtt-streamdeck-module)
-- A relay built from the [DanElbert/foundryvtt-rest-api-relay](https://github.com/DanElbert/foundryvtt-rest-api-relay)
-  fork, which accepts the `streamdeck` request type the plugin uses. A stock relay rejects it, and the
-  plugin logs an error saying so.
+- For the Actor Sheet, Condition, Initiative and Macro actions: a Foundry world (dnd5e, for conditions)
+  with the [Stream Deck Companion module](https://github.com/DanElbert/foundryvtt-streamdeck-module)
+  (1.0 or later) enabled, and the GM's browser running on the same machine as OpenDeck, or on one
+  that can reach it. No relay, no account, no other module.
 
 ## Build and install
 
@@ -71,48 +68,61 @@ Press to toggle the actor's character sheet open or closed in Foundry. The key s
 token art, with a coloured border while the sheet is open and a grey border when Foundry can't be
 reached.
 
+### How the plugin talks to Foundry
+
+The plugin opens a small WebSocket server on your machine (`127.0.0.1:28415` by default). The
+companion module, running in the GM's browser, connects to it and authenticates with a shared token.
+Nothing runs anywhere else, and the plugin never runs arbitrary JavaScript in Foundry: it calls a
+fixed set of companion functions.
+
+### Plugin setup
+
+Open any Foundry button's property inspector and expand **Plugin connection** (shared by every
+button). Press **Generate** to create a token, **Copy** it, then **Save connection**. The status line
+should read `listening on 127.0.0.1:28415 — waiting for companion`. Change the port if that one is
+taken. Leave the listen address at `127.0.0.1` unless the GM's browser runs on another machine; then
+use `0.0.0.0` and point Foundry at this machine's hostname. The token is the only thing guarding the
+socket in that case, so only do it on a trusted network.
+
 ### Foundry setup
 
-Install and enable the **Stream Deck Companion** module (`foundryvtt-streamdeck`) in the world. Its
+Install and enable the **Stream Deck Companion module** (`foundryvtt-streamdeck`) in the world. Its
 manifest URL is:
 
 ```
 https://raw.githubusercontent.com/DanElbert/foundryvtt-streamdeck-module/main/module.json
 ```
 
-The plugin never runs JavaScript in Foundry, so **Allow Execute JavaScript** in the REST API module
-settings can be left **off** (recommended: with it on, anyone holding a relay key for the world can run
-arbitrary JavaScript in the GM's browser). *Notify on Execute JS* doesn't matter either.
+In the browser that runs beside OpenDeck (normally the GM's), open **Configure Settings → Module
+Settings** and fill in **Stream Deck: Plugin URL** (`ws://localhost:28415` unless the port was
+changed) and **Stream Deck: Token** (paste the token). These are per-browser settings; other
+players' browsers never connect. The connection is made as soon as the settings are saved, and the
+property inspector's status line changes to `companion 1.0.0 connected`.
 
-Without the companion module enabled, the plugin logs a warning, the property inspector shows
-"companion module missing", and presses flash the alert.
+A rejected token shows a permanent error notification in Foundry; fix the setting and it reconnects.
+Browsers allow a page served over https to open a plain `ws://localhost` socket, so a remote Foundry
+server works too. Recent Chrome versions may ask once for permission to reach the local network.
 
-### Plugin setup
-
-Open the button's property inspector and expand **Relay connection** (shared by every button):
-relay URL, client ID and API key. Then pick an actor from the dropdown (grouped by the world's
-actor folders), or paste an `Actor.xxxxxxxx` UUID directly if the list is unavailable.
+Then pick an actor from the dropdown (grouped by the world's actor folders), or paste an
+`Actor.xxxxxxxx` UUID directly if the list is unavailable.
 
 **Artwork** chooses between the token image, the portrait, or whatever the game system prefers.
 Token is the default.
 
 ### State sync
 
-There is no polling. The companion module pushes an event over the relay whenever an actor sheet
-opens or closes in the GM's browser, and the matching buttons update immediately. When the plugin
-connects, and whenever the GM's browser reloads, the full set of open sheets is sent so the deck
-catches up.
-
-Without the companion module the button still toggles sheets, but it won't notice sheets opened or
-closed directly in Foundry. The plugin logs a warning and the property inspector shows
-"companion module missing".
+There is no polling. The companion module pushes an event whenever an actor sheet opens or closes in
+the GM's browser, and the matching buttons update immediately. Whenever the browser connects, which
+includes every reload, it sends the full set of open sheets so the deck catches up. While no browser
+is connected, every Foundry button shows its grey offline border and presses flash the alert.
 
 ## The Condition action
 
 Each key is bound to one D&D 5e condition: blinded, charmed, deafened, frightened, grappled,
-incapacitated, invisible, paralyzed, petrified, poisoned, prone, restrained, stunned or unconscious.
+incapacitated, invisible, paralyzed, petrified, poisoned, prone, restrained, stunned, surprised or
+unconscious.
 Exhaustion isn't offered. Pick the condition in the property inspector; the list comes from
-Foundry, so the relay must be connected and the companion module enabled.
+Foundry, so the companion must be connected.
 
 The key follows whichever tokens are selected in the GM's browser:
 

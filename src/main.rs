@@ -7,7 +7,7 @@ mod foundry;
 mod image;
 mod initiative;
 mod macros;
-mod relay;
+mod server;
 mod sheet;
 
 use config::{Config, apply_env_fallback};
@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 
 struct Handler {
 	config: Arc<RwLock<Config>>,
-	relay: Arc<relay::Relay>,
+	server: Arc<server::Server>,
 	actions: events::Actions,
 }
 
@@ -48,7 +48,7 @@ impl GlobalEventHandler for Handler {
 		log::debug!("global settings applied: {:?}", self.config.read().await);
 
 		if reconnect {
-			self.relay.config_changed.notify_waiters();
+			self.server.config_changed.notify_waiters();
 		}
 		if repaint {
 			self.actions.clear_art().await;
@@ -59,8 +59,8 @@ impl GlobalEventHandler for Handler {
 	}
 
 	async fn system_did_wake_up(&self, _event: SystemDidWakeUpEvent) -> OpenActionResult<()> {
-		log::info!("system woke up; forcing relay reconnect");
-		self.relay.config_changed.notify_waiters();
+		log::info!("system woke up; restarting listener");
+		self.server.config_changed.notify_waiters();
 		Ok(())
 	}
 }
@@ -77,15 +77,15 @@ async fn main() {
 	}
 
 	let config = Arc::new(RwLock::new(apply_env_fallback(Config::default())));
-	let relay = Arc::new(relay::Relay::new(config.clone()));
+	let server = Arc::new(server::Server::new(config.clone()));
 	let state = Arc::new(sheet::SheetState::default());
 	let sheet = sheet::Sheet {
-		relay: relay.clone(),
+		server: server.clone(),
 		config: config.clone(),
 		state: state.clone(),
 	};
 	let condition = condition::Condition {
-		relay: relay.clone(),
+		server: server.clone(),
 		config: config.clone(),
 		state: Arc::new(condition::ConditionState::default()),
 	};
@@ -95,7 +95,7 @@ async fn main() {
 		state: Arc::new(initiative::InitiativeState::default()),
 	};
 	let macros = macros::Macro {
-		relay: relay.clone(),
+		server: server.clone(),
 		config: config.clone(),
 		state: Arc::new(macros::MacroState::default()),
 	};
@@ -108,22 +108,27 @@ async fn main() {
 
 	set_global_event_handler(Box::leak(Box::new(Handler {
 		config: config.clone(),
-		relay: relay.clone(),
+		server: server.clone(),
 		actions: actions.clone(),
 	})));
 
-	tokio::spawn(relay.clone().run_forever());
+	tokio::spawn(server.clone().run_forever());
 	tokio::spawn(events::event_loop(actions.clone()));
 	tokio::spawn(initiative.clone().art_loop());
 
 	{
 		let actions = actions.clone();
-		let relay = relay.clone();
+		let server = server.clone();
 		tokio::spawn(async move {
+			let mut last_world: Option<String> = None;
 			loop {
-				relay.session_started.notified().await;
-				actions.sheet.state.clear_art().await;
-				actions.macros.state.clear_art().await;
+				server.session_started.notified().await;
+				let world = server.world().await;
+				if world != last_world {
+					actions.sheet.state.clear_art().await;
+					actions.macros.state.clear_art().await;
+					last_world = world;
+				}
 				events::resync(actions.clone()).await;
 				actions.repaint_all().await;
 			}
@@ -132,11 +137,22 @@ async fn main() {
 
 	{
 		let actions = actions.clone();
-		let relay = relay.clone();
+		let server = server.clone();
 		tokio::spawn(async move {
 			loop {
-				relay.session_ended.notified().await;
+				server.session_ended.notified().await;
 				actions.repaint_all().await;
+				actions.push_connection_state_to_all().await;
+			}
+		});
+	}
+
+	{
+		let actions = actions.clone();
+		let server = server.clone();
+		tokio::spawn(async move {
+			loop {
+				server.listen_changed.notified().await;
 				actions.push_connection_state_to_all().await;
 			}
 		});

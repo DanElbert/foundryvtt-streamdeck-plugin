@@ -2,7 +2,7 @@ use crate::config::{Config, OFFLINE_COLOR};
 use crate::connection;
 use crate::foundry;
 use crate::image::{ConditionArt, ConditionKey, TtlCache};
-use crate::relay::Relay;
+use crate::server::Server;
 
 use openaction::*;
 use serde::{Deserialize, Serialize};
@@ -123,7 +123,7 @@ impl ConditionState {
 
 #[derive(Clone)]
 pub struct Condition {
-	pub relay: Arc<Relay>,
+	pub server: Arc<Server>,
 	pub config: Arc<RwLock<Config>>,
 	pub state: Arc<ConditionState>,
 }
@@ -160,7 +160,7 @@ impl Condition {
 
 		let variant = {
 			let selection = self.state.selection.read().await;
-			Variant::pick(self.relay.is_connected(), &selection, &settings.status_id)
+			Variant::pick(self.server.is_connected(), &selection, &settings.status_id)
 		};
 		let title = settings.show_title.then_some(name);
 		instance
@@ -181,7 +181,7 @@ impl Condition {
 	}
 
 	async fn refetch_if_missing(&self, instance_id: InstanceId, settings: &ConditionSettings) {
-		if !self.relay.is_connected()
+		if !self.server.is_connected()
 			|| self
 				.state
 				.art
@@ -208,7 +208,7 @@ impl Condition {
 			return;
 		}
 
-		let result = foundry::condition_art(&self.relay, &key.id, &key.accent, OFFLINE_COLOR).await;
+		let result = foundry::condition_art(&self.server, &key.id, &key.accent, OFFLINE_COLOR).await;
 		self.state.inflight.lock().await.remove(&key);
 
 		match result {
@@ -247,7 +247,7 @@ impl Condition {
 	}
 
 	pub async fn push_connection_state(&self, instance: &Instance) {
-		connection::push_state(&self.relay, &self.config, instance).await;
+		connection::push_state(&self.server, &self.config, instance).await;
 	}
 }
 
@@ -311,7 +311,7 @@ impl Action for Condition {
 			return instance.show_alert().await;
 		}
 
-		match foundry::toggle_condition(&self.relay, id).await {
+		match foundry::toggle_condition(&self.server, id).await {
 			Ok(value) => match value.get("error").and_then(Value::as_str) {
 				Some(error) => {
 					log::warn!("toggle condition {id} failed: {error}");
@@ -346,7 +346,7 @@ impl Action for Condition {
 				let reply = foundry::list_reply(
 					"conditions",
 					"conditions",
-					foundry::conditions(&self.relay).await,
+					foundry::conditions(&self.server).await,
 				);
 				let _ = instance.send_to_property_inspector(reply).await;
 			}

@@ -2,7 +2,7 @@ use crate::config::{Config, Indicator, OFFLINE_COLOR};
 use crate::connection;
 use crate::foundry::{self, ArtSource};
 use crate::image::{ArtCache, ArtEntry, ArtKey, wrap_svg};
-use crate::relay::Relay;
+use crate::server::Server;
 
 use openaction::*;
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,7 @@ impl SheetState {
 
 #[derive(Clone)]
 pub struct Sheet {
-	pub relay: Arc<Relay>,
+	pub server: Arc<Server>,
 	pub config: Arc<RwLock<Config>>,
 	pub state: Arc<SheetState>,
 }
@@ -106,7 +106,7 @@ impl Sheet {
 			return instance.set_title(Some("Pick actor"), None).await;
 		}
 
-		let online = self.relay.is_connected();
+		let online = self.server.is_connected();
 		let open = *self
 			.state
 			.open
@@ -187,7 +187,7 @@ impl Sheet {
 	}
 
 	async fn refetch_if_missing(&self, instance_id: InstanceId, settings: &SheetSettings) {
-		if !self.relay.is_connected()
+		if !self.server.is_connected()
 			|| self
 				.state
 				.art
@@ -233,7 +233,7 @@ impl Sheet {
 			(config.border_color.clone(), config.indicator)
 		};
 		let result = foundry::actor_art(
-			&self.relay,
+			&self.server,
 			&settings.actor_uuid,
 			settings.art_source,
 			&open_color,
@@ -297,7 +297,7 @@ impl Sheet {
 	}
 
 	pub async fn toggle(&self, uuid: &str) -> Result<(), String> {
-		let value = foundry::toggle_sheet(&self.relay, uuid)
+		let value = foundry::toggle_sheet(&self.server, uuid)
 			.await
 			.map_err(|e| e.to_string())?;
 		if let Some(error) = value.get("error").and_then(Value::as_str) {
@@ -310,7 +310,7 @@ impl Sheet {
 	}
 
 	pub async fn push_connection_state(&self, instance: &Instance) {
-		connection::push_state(&self.relay, &self.config, instance).await;
+		connection::push_state(&self.server, &self.config, instance).await;
 	}
 }
 
@@ -369,7 +369,7 @@ impl Action for Sheet {
 	}
 
 	async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-		if settings.actor_uuid.trim().is_empty() || !foundry::companion_ready(&self.relay).await {
+		if settings.actor_uuid.trim().is_empty() || !self.server.is_connected() {
 			return instance.show_alert().await;
 		}
 
@@ -400,7 +400,7 @@ impl Action for Sheet {
 		match payload.get("event").and_then(Value::as_str) {
 			Some("getActors") => {
 				let reply =
-					foundry::list_reply("actors", "actors", foundry::actors(&self.relay).await);
+					foundry::list_reply("actors", "actors", foundry::actors(&self.server).await);
 				let _ = instance.send_to_property_inspector(reply).await;
 			}
 			Some("refreshArt") => {

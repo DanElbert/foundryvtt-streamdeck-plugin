@@ -114,23 +114,28 @@
 		</div>
 
 		<details>
-			<summary>Relay connection (shared by all buttons)</summary>
+			<summary>Plugin connection (shared by all buttons)</summary>
 			<div class="field">
-				<label for="relayUrl">Relay URL</label>
-				<input id="relayUrl" type="text" placeholder="wss://foundryrestapi.fly.dev" />
+				<label for="token">Token</label>
+				<input id="token" type="password" placeholder="(generate one)" autocomplete="off" />
+				<div class="row">
+					<button id="genToken" type="button">Generate</button>
+					<button id="showToken" type="button">Show</button>
+					<button id="copyToken" type="button">Copy</button>
+				</div>
 			</div>
 			<div class="field">
-				<label for="clientId">Client ID (optional)</label>
-				<input id="clientId" type="text" placeholder="(taken from the API key)" />
-				<p class="hint" id="resolved"></p>
+				<label for="port">Port</label>
+				<input id="port" type="number" min="1" max="65535" />
 			</div>
 			<div class="field">
-				<label for="apiKey">API key</label>
-				<input id="apiKey" type="password" placeholder="(required)" />
+				<label for="bind">Listen address</label>
+				<input id="bind" type="text" placeholder="127.0.0.1" />
+				<p class="hint" id="pluginUrl"></p>
 			</div>
 			<p class="warn">
-				Requires the Stream Deck Companion module (foundryvtt-streamdeck) enabled in the
-				world and the patched relay. "Allow Execute JavaScript" can stay off.
+				In Foundry, enable the Stream Deck Companion module (foundryvtt-streamdeck) and enter
+				the URL above and this token in its settings, in the browser running beside OpenDeck.
 			</p>
 			<div class="row">
 				<button id="saveConn" type="button">Save connection</button>
@@ -229,16 +234,16 @@
 					}
 
 					if (p.event === "connection") {
-						if (idle(el("relayUrl"))) el("relayUrl").value = p.relayUrl ?? "";
-						if (idle(el("clientId"))) el("clientId").value = p.clientId ?? "";
-						el("apiKey").placeholder = p.hasApiKey ? "(unchanged)" : "(required)";
-						el("resolved").textContent = p.resolvedClientId
-							? "relay resolved: " + p.resolvedClientId
-							: "";
-						let state = p.connected ? "relay connected" : "relay disconnected";
-						if (p.connected) {
-							state += p.companion ? " — companion " + p.companion : " — companion module missing";
-						}
+						if (idle(el("bind"))) el("bind").value = p.bind ?? "";
+						if (idle(el("port"))) el("port").value = p.port ?? "";
+						if (idle(el("token"))) el("token").value = p.token ?? "";
+						el("pluginUrl").textContent = "Foundry → Stream Deck: Plugin URL = " + (p.url ?? "");
+						let state;
+						if (!p.hasToken) state = "no token: generate one and save";
+						else if (p.listenError) state = "listen failed: " + p.listenError;
+						else if (!p.listening) state = "not listening";
+						else if (p.connected) state = "listening on " + p.bind + ":" + p.port + " — companion " + (p.companion ?? "?") + " connected";
+						else state = "listening on " + p.bind + ":" + p.port + " — waiting for companion";
 						el("status").textContent = state;
 					}
 				};
@@ -251,12 +256,29 @@
 				el("showTitle").addEventListener("change", commit);
 				el("reload").addEventListener("click", () => toPlugin({ event: "getMacros" }));
 				el("refresh").addEventListener("click", () => toPlugin({ event: "refreshArt" }));
+				el("genToken").addEventListener("click", () => {
+					el("token").value = Array.from(crypto.getRandomValues(new Uint8Array(24)), (b) =>
+						b.toString(16).padStart(2, "0"),
+					).join("");
+					el("token").type = "text";
+				});
+				el("showToken").addEventListener("click", () => {
+					el("token").type = el("token").type === "password" ? "text" : "password";
+				});
+				el("copyToken").addEventListener("click", () => {
+					const input = el("token");
+					input.type = "text";
+					input.select();
+					(navigator.clipboard?.writeText(input.value) ?? Promise.reject()).catch(() =>
+						document.execCommand("copy"),
+					);
+				});
 				el("saveConn").addEventListener("click", () =>
 					toPlugin({
 						event: "setConnection",
-						relayUrl: el("relayUrl").value.trim(),
-						clientId: el("clientId").value.trim(),
-						apiKey: el("apiKey").value,
+						bind: el("bind").value.trim(),
+						port: el("port").value.trim(),
+						token: el("token").value.trim(),
 					}),
 				);
 

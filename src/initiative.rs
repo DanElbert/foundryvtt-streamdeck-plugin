@@ -116,7 +116,7 @@ impl Initiative {
 		instance: &Instance,
 		settings: &InitiativeSettings,
 	) -> OpenActionResult<()> {
-		let online = self.sheet.relay.is_connected();
+		let online = self.sheet.server.is_connected();
 		let combat = self.state.combat.read().await.clone();
 
 		let Some(combat) = combat else {
@@ -178,7 +178,7 @@ impl Initiative {
 	}
 
 	pub async fn push_connection_state(&self, instance: &Instance) {
-		connection::push_state(&self.sheet.relay, &self.sheet.config, instance).await;
+		connection::push_state(&self.sheet.server, &self.sheet.config, instance).await;
 	}
 
 	pub async fn art_loop(self) {
@@ -240,7 +240,7 @@ impl Action for Initiative {
 	) -> OpenActionResult<()> {
 		let combat = self.state.combat.read().await.clone();
 
-		if combat.is_some() && !foundry::companion_ready(&self.sheet.relay).await {
+		if combat.is_some() && !self.sheet.server.is_connected() {
 			return instance.show_alert().await;
 		}
 
@@ -264,7 +264,7 @@ impl Action for Initiative {
 			return instance.show_alert().await;
 		}
 
-		match foundry::start_combat(&self.sheet.relay).await {
+		match foundry::start_combat(&self.sheet.server).await {
 			Ok(value) => match value.get("error").and_then(Value::as_str) {
 				Some(error) => {
 					log::warn!("start combat failed: {error}");

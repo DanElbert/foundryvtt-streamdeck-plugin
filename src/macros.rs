@@ -2,7 +2,7 @@ use crate::config::{Config, OFFLINE_COLOR};
 use crate::connection;
 use crate::foundry;
 use crate::image::{MacroArt, TtlCache};
-use crate::relay::Relay;
+use crate::server::Server;
 
 use openaction::*;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,7 @@ impl MacroState {
 
 #[derive(Clone)]
 pub struct Macro {
-	pub relay: Arc<Relay>,
+	pub server: Arc<Server>,
 	pub config: Arc<RwLock<Config>>,
 	pub state: Arc<MacroState>,
 }
@@ -69,7 +69,7 @@ impl Macro {
 			return instance.set_title(Some(name), None).await;
 		};
 
-		let image = if self.relay.is_connected() {
+		let image = if self.server.is_connected() {
 			entry.ready
 		} else {
 			entry.offline
@@ -92,7 +92,7 @@ impl Macro {
 	}
 
 	async fn refetch_if_missing(&self, instance_id: InstanceId, settings: &MacroSettings) {
-		if !self.relay.is_connected()
+		if !self.server.is_connected()
 			|| self
 				.state
 				.art
@@ -116,7 +116,7 @@ impl Macro {
 			return;
 		}
 
-		let result = foundry::macro_art(&self.relay, &uuid, OFFLINE_COLOR).await;
+		let result = foundry::macro_art(&self.server, &uuid, OFFLINE_COLOR).await;
 		self.state.inflight.lock().await.remove(&uuid);
 
 		match result {
@@ -155,7 +155,7 @@ impl Macro {
 	}
 
 	pub async fn push_connection_state(&self, instance: &Instance) {
-		connection::push_state(&self.relay, &self.config, instance).await;
+		connection::push_state(&self.server, &self.config, instance).await;
 	}
 }
 
@@ -215,11 +215,11 @@ impl Action for Macro {
 
 	async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
 		let uuid = settings.macro_uuid.trim();
-		if uuid.is_empty() || !foundry::companion_ready(&self.relay).await {
+		if uuid.is_empty() || !self.server.is_connected() {
 			return instance.show_alert().await;
 		}
 
-		match foundry::execute_macro(&self.relay, uuid).await {
+		match foundry::execute_macro(&self.server, uuid).await {
 			Ok(value) => match value.get("error").and_then(Value::as_str) {
 				Some(error) => {
 					log::warn!("execute macro {uuid} failed: {error}");
@@ -252,7 +252,7 @@ impl Action for Macro {
 		match payload.get("event").and_then(Value::as_str) {
 			Some("getMacros") => {
 				let reply =
-					foundry::list_reply("macros", "macros", foundry::macros(&self.relay).await);
+					foundry::list_reply("macros", "macros", foundry::macros(&self.server).await);
 				let _ = instance.send_to_property_inspector(reply).await;
 			}
 			Some("refreshArt") => {

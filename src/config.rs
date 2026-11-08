@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const OFFLINE_COLOR: &str = "#6b6b6b";
+pub const DEFAULT_BIND: &str = "127.0.0.1";
+pub const DEFAULT_PORT: u16 = 28415;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -13,9 +15,9 @@ pub enum Indicator {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
-	pub relay_url: String,
-	pub api_key: String,
-	pub client_id: String,
+	pub bind: String,
+	pub port: u16,
+	pub token: String,
 	pub indicator: Indicator,
 	pub border_color: String,
 }
@@ -23,9 +25,9 @@ pub struct Config {
 impl Default for Config {
 	fn default() -> Self {
 		Self {
-			relay_url: String::new(),
-			api_key: String::new(),
-			client_id: String::new(),
+			bind: DEFAULT_BIND.to_string(),
+			port: DEFAULT_PORT,
+			token: String::new(),
 			indicator: Indicator::Border,
 			border_color: "#ff6400".to_string(),
 		}
@@ -33,46 +35,29 @@ impl Default for Config {
 }
 
 impl Config {
-	/// A scoped relay key can carry its own clientId, in which case the relay resolves it
-	/// for us and the setting may be left blank.
 	pub fn is_complete(&self) -> bool {
-		!self.relay_url.trim().is_empty() && !self.api_key.trim().is_empty()
+		!self.token.trim().is_empty() && self.port != 0
 	}
 
 	pub fn connection_differs(&self, other: &Self) -> bool {
-		self.relay_url != other.relay_url
-			|| self.api_key != other.api_key
-			|| self.client_id != other.client_id
+		self.bind != other.bind || self.port != other.port || self.token != other.token
 	}
 
 	pub fn appearance_differs(&self, other: &Self) -> bool {
 		self.indicator != other.indicator || self.border_color != other.border_color
 	}
 
-	pub fn socket_url(&self) -> String {
-		let base = self.relay_url.trim().trim_end_matches('/');
-		let base = match base.strip_prefix("https://") {
-			Some(rest) => format!("wss://{rest}"),
-			None => match base.strip_prefix("http://") {
-				Some(rest) => format!("ws://{rest}"),
-				None => base.to_string(),
-			},
-		};
-		let client_id = self.client_id.trim();
-		if client_id.is_empty() {
-			format!("{base}/ws/api")
-		} else {
-			format!("{base}/ws/api?clientId={}", urlencode(client_id))
-		}
+	pub fn url(&self) -> String {
+		format!("ws://localhost:{}", self.port)
 	}
 }
 
 impl std::fmt::Debug for Config {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Config")
-			.field("relay_url", &self.relay_url)
-			.field("api_key", &redact(&self.api_key))
-			.field("client_id", &self.client_id)
+			.field("bind", &self.bind)
+			.field("port", &self.port)
+			.field("token", &redact(&self.token))
 			.field("border_color", &self.border_color)
 			.finish()
 	}
@@ -89,38 +74,24 @@ pub fn redact(secret: &str) -> String {
 	}
 }
 
-fn urlencode(raw: &str) -> String {
-	let mut out = String::with_capacity(raw.len());
-	for byte in raw.bytes() {
-		match byte {
-			b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-				out.push(byte as char)
-			}
-			_ => out.push_str(&format!("%{byte:02X}")),
-		}
-	}
-	out
-}
-
 pub fn apply_env_fallback(mut config: Config) -> Config {
 	fn env(key: &str) -> Option<String> {
 		std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 	}
 
-	if config.relay_url.trim().is_empty()
-		&& let Some(v) = env("FOUNDRY_RELAY_URL")
-	{
-		config.relay_url = v;
+	if config.bind.trim().is_empty() {
+		config.bind = env("FOUNDRY_SD_BIND").unwrap_or_else(|| DEFAULT_BIND.to_string());
 	}
-	if config.api_key.trim().is_empty()
-		&& let Some(v) = env("FOUNDRY_RELAY_KEY")
-	{
-		config.api_key = v;
+	if config.port == 0 {
+		config.port = env("FOUNDRY_SD_PORT")
+			.and_then(|v| v.trim().parse().ok())
+			.filter(|p| *p != 0)
+			.unwrap_or(DEFAULT_PORT);
 	}
-	if config.client_id.trim().is_empty()
-		&& let Some(v) = env("FOUNDRY_RELAY_CLIENT_ID")
+	if config.token.trim().is_empty()
+		&& let Some(v) = env("FOUNDRY_SD_TOKEN")
 	{
-		config.client_id = v;
+		config.token = v;
 	}
 	config
 }

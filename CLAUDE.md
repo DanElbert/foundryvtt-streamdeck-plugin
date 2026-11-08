@@ -10,10 +10,10 @@ plus Actor Sheet, Condition, Initiative and Macro actions driven through the com
 
 | Path | Notes |
 |---|---|
-| `src/main.rs` | Wiring only: logger, config, relay + companion-event loop spawn, session start/end repaint tasks, `set_global_event_handler`, `register_action`, `run`. |
-| `src/config.rs` | `Config`, env fallback, redaction. Hand-written `Debug` — never derive it, it holds the API key. |
-| `src/relay.rs` | Relay WebSocket client: auth, reconnect, request correlation. |
-| `src/foundry.rs` | Typed wrappers for the companion API over the `streamdeck` request type — the whole plugin→Foundry surface in one place. No JavaScript lives in the plugin. |
+| `src/main.rs` | Wiring only: logger, config, server + companion-event loop spawn, session start/end and listener-state tasks, `set_global_event_handler`, `register_action`, `run`. |
+| `src/config.rs` | `Config`, env fallback, redaction. Hand-written `Debug` — never derive it, it holds the token. |
+| `src/server.rs` | WebSocket server the companion module dials: token `hello`, one session at a time, ping deadline, request/result correlation. |
+| `src/foundry.rs` | Typed wrappers for the companion API over `request` frames — the whole plugin→Foundry surface in one place. No JavaScript lives in the plugin. |
 | `src/image.rs` | Generic `TtlCache` (TTL 10 min, LRU 32), token-art and condition-art entry types, and the SVG-wrapper fallback. |
 | `src/counter.rs` | Counter action: short/long press, per-press action + step, reset-to-start. |
 | `src/sheet.rs` | Sheet-toggle action and its instance mirror. |
@@ -21,11 +21,10 @@ plus Actor Sheet, Condition, Initiative and Macro actions driven through the com
 | `src/initiative.rs` | Initiative action: combat state, start-combat press, current-combatant display via the sheet pipeline. |
 | `src/macros.rs` | Macro action (`macro` is a reserved word, hence the module name). |
 | `src/events.rs` | `Actions` (sheet + condition + initiative + macro), the companion event loop and the per-session resync. |
-| `src/connection.rs` | Connection state pushed to, and `setConnection` from, both actions' PIs. Global config, so one implementation. |
+| `src/connection.rs` | Connection state pushed to, and `setConnection` from, every action's PI. Global config, so one implementation. |
 | `assets/` | **Staging directory, not an installed path.** See below. |
 | `build.sh` | `cargo build` + assemble `dist/<uuid>.sdPlugin/` for hand-copying. |
 | `dist/` | Build output, gitignored. |
-| `.relay.local` | Gitignored test credentials, sourced into the environment by the harness. Never read by the plugin directly. |
 
 ### `assets/` maps to the `.sdPlugin` root
 
@@ -223,73 +222,48 @@ For real headless end-to-end testing, `openaction`'s `device_plugin` module (`re
 mechanism behind Tacto. A small companion plugin registering a fake 3x2 device would make
 integration tests CI-able.
 
-## Where the Foundry relay will attach
-
-Not built yet, but these shape decisions already made:
-
-- `run()` blocks for the process lifetime, so the relay client is a `tokio::spawn` started
-  **before** it. It will want tokio's `time` feature for reconnect backoff.
-- Push-driven title updates use `visible_instances()` / `get_instance()` — a relay event arrives
-  with no `Instance` in hand, so that is the lookup path.
-- Relay URL and scoped API key belong in **global** settings (`get_global_settings` /
-  `set_global_settings`, plus `HasSettingsInterface: true`), not per-action settings. They are
-  plugin-wide, and duplicating them per key would be miserable to retrofit.
-- Shared state rides on the action struct: `register_action(Counter)` takes ownership, so
-  `Counter { relay: Arc<Relay> }` is the natural home, with `&self` handlers reading it.
-- The sibling `foundryvtt-rest-api-relay` speaks `ws://host:3010/ws/api?clientId=...` with
-  first-message-only auth (`{"type":"auth","token":...}` within 10s or close code 4002), and ships
-  generated `openapi.json` / `asyncapi.json` a client can be derived from.
-
-
 ## The sheet action
 
-### Requests go through the companion, not `execute-js`
+### Requests go to the companion over our own socket
 
-Every plugin→Foundry call is `{"type":"streamdeck","action":…,"args":[…]}` (`Relay::call`, wrapped
-per action in `foundry.rs`). The companion module registers a handler for that type on the REST
-module's socket and dispatches `action` to its API; the reply is
-`{"type":"streamdeck-result","result":…}`, or a top-level `error` for an unknown or throwing action.
-See the module's `CLAUDE.md` for the handler and for the ported toggle/art logic.
+The plugin **hosts** a WebSocket server (`server.rs`); the companion module in the GM's browser dials
+it. There is no relay and no REST module any more (that stack was retired in 1.0; the
+`foundryvtt-rest-api-relay/` fork and `foundryvtt-rest-api/` checkouts in the workspace are history).
+Every plugin→Foundry call is `{"type":"request","requestId","action","args":[…]}` (`Server::call`,
+wrapped per action in `foundry.rs`); the companion dispatches `action` to its API and answers
+`{"type":"result","requestId","result":…}` or `{"type":"result","requestId","error":…}`. See the
+module's `CLAUDE.md` for the handler and for the toggle/art logic.
 
-- **Requires the relay fork patch:** the stock relay rejects request types missing from its
-  hardcoded `PendingRequestTypes` (`go-relay/internal/ws/pending.go`), which is also what routes
-  `<type>-result` replies. The welcome frame's `supportedTypes` is checked, and a
-  `Remote("Unknown message type…")` from the sync logs the same fork-patch error.
-- **Two error layers:** a top-level `error` is a `RelayError::Remote` (transport/dispatch); an
-  `error` *inside* `result` is a domain answer like `{error:"no selection"}`, checked at each call site.
-- **Companion missing = no reply at all** — the REST module just debug-logs an unhandled type. So
-  `foundry::sync` uses `SYNC_TIMEOUT` (5 s) and a timeout there means "companion missing"; everything
-  else uses the 25 s `REQUEST_TIMEOUT`. `relay.companion()` is cleared in `teardown`, set by the sync,
-  and also set by a pushed `snapshot` event carrying `version`, so enabling the module later is
-  picked up without a reconnect.
-- **Presses don't wait 25 s for a missing companion.** Sheet presses (and initiative presses during
-  a combat) call `foundry::companion_ready`, which re-probes with the 5 s sync when the companion is
-  unknown; a slow GM browser therefore self-heals instead of locking presses out. Condition and
-  no-combat initiative presses already alert locally, because their pushed state is empty.
-- *Allow Execute JavaScript* can be **off**, and *Notify on Execute JS* no longer matters.
+- **Two error layers:** a top-level `error` is a `ServerError::Remote` (dispatch: unknown action, a
+  throw, an unserialisable reply); an `error` *inside* `result` is a domain answer like
+  `{error:"no selection"}`, checked at each call site.
+- **Connected means the companion is there.** Only the companion speaks this protocol, and its
+  `hello` carries its version, so `server.companion()` is set at auth and cleared in `teardown`.
+  The old "companion missing" state, its 5 s probe and `companion_ready` are gone; presses check
+  `is_connected()` and alert locally when it is false.
+- `REQUEST_TIMEOUT` is 25 s; a GM browser that stops answering is dropped by the ping deadline
+  (below) well before that matters.
 
-The companion module `foundryvtt-streamdeck` (`../foundryvtt-streamdeck-module`) is **required**: it
-answers every request and pushes every state change. There is no fallback.
+The companion module `foundryvtt-streamdeck` (`../foundryvtt-streamdeck-module`) 1.0+ is
+**required**: it answers every request and pushes every state change. There is no fallback, and
+plugin and module versions must move together (the wire protocol changed in 1.0 on both sides).
 
 ### Sheet state is pushed, not polled
 
-The companion module emits `hook-event` frames with hook `foundryvtt-streamdeck.event` (`EVENT_HOOK`; it was
-`.sheet` before companion 0.2.0, and the old name is now ignored) through the REST
-module's own relay socket; see that module's `CLAUDE.md` for why the relay forwards a hook name it
-has never heard of. Here:
+The companion sends `{"type":"event","event":"sheet"|"snapshot"|"selection"|"combat", …}` frames;
+`Server::dispatch` puts every `event` frame, as is, on the `events` broadcast channel and
+`events::event_loop` keys on `event`. Here:
 
-- `relay.rs` sends `{"type":"subscribe","channel":"hooks"}` straight after auth, **before**
-  `session_started`, so no event can slip between subscribing and the resync.
-- `dispatch` routes only `hook == EVENT_HOOK` frames, unwrapping `data.data.args[0]`, onto a
-  `broadcast` channel. Everything else on `hooks` is the REST module's firehose of 33 built-in
-  hooks, which our subscription switches on as a side effect; it is dropped. WS subscribers cannot
-  filter server-side (the relay's `AddWSEventFunc` ignores `filters`).
 - Payloads are `{event:"sheet", uuid, open}` and `{event:"snapshot", open:[uuid...]}`. A snapshot is
   the complete set: `apply_snapshot` **replaces** `open`, so anything absent is closed.
-- `resync` is the one `snapshot` request per session: companion version (shown in the PI), open
-  sheets, selection and combat. It also runs if the broadcast receiver lags.
-- A GM browser reload closes every sheet while *our* relay session stays up, so `resync` never
-  runs. The companion covers it by emitting a snapshot on `foundry-rest-api.relayConnected`.
+- `resync` is the one `snapshot` request per session: open sheets, selection and combat. It also
+  runs if the broadcast receiver lags. The companion pushes the same snapshot (plus forced
+  selection/combat) right after `connected`, so the two usually agree; the request is kept because
+  it is the testable, deterministic path.
+- Every GM browser reload is now a full `session_ended` → `session_started` cycle (the socket is the
+  browser's). The session-start task in `main.rs` therefore clears the token/macro art caches only
+  when the `world` from `hello` differs from the previous session's, so a reload does not refetch
+  every button's art.
 
 ### The instance mirror is not optional
 
@@ -313,26 +287,38 @@ module's `CLAUDE.md`. What still matters on this side:
   webkit2gtk rendering a `data:` URI nested inside an SVG `data:` URI (unverifiable without hardware).
   The `Indicator::Svg` option still does exactly that, as an opt-in.
 
-### Relay client
+### Server
 
-- Success on auth is `{"type":"connected"}` — **not** `auth-success`; the relay docs are stale.
-- The connection task owns the whole `WebSocketStream` and drives reads and writes in one `select!`.
-  **Do not `split()` it.** The relay pings every 20 s and tungstenite's auto-Pong needs the write
-  half to flush; single ownership makes that guaranteed rather than something to reason about.
-- Request timeout is 25 s (`REQUEST_TIMEOUT`), inside the relay's 30 s, so our error surfaces
-  first; `Relay::request` takes it as a parameter so the companion sync can use 5 s.
-- On disconnect, `pending` is drained so in-flight callers fail immediately instead of waiting out
-  the timeout, and the **token** art cache is cleared on the next session start because a new session
-  may be a different world. Condition art is kept: it depends only on the game system.
-- The relay's WS `download-file` and `sheet-screenshot` **return no bytes** — `format` is stripped,
-  the callback is nil, and the payload is discarded. Do not try to move images over `/ws/api`.
+`Server::run_forever` binds `bind:port` (`TcpListener`, `tokio_tungstenite::accept_async`), retrying
+with backoff and surfacing a failed bind as `listen_error` in the PI, and rebinds on
+`config_changed`. Inside, `serve` runs one `select!` over accept, authenticated connections, the
+current session and `config_changed`:
+
+- **Auth is a spawned per-connection `handshake`**, outside the session owner so a slow or hostile
+  client can't starve pings: WebSocket accept, then the first text frame within 5 s must be
+  `{"type":"hello","token","version","world"}`. Token compare is a byte fold, not `==`. Failure
+  closes with `4001` (no/bad hello) or `4002` (bad token). Success sends
+  `{"type":"connected","plugin":<version>}` and hands the stream to `serve` through a channel.
+- **One session at a time.** A newer authenticated connection makes `serve` signal the running
+  session to close its socket with `4003` ("replaced"), await it, `teardown`, then install the new
+  one. The companion treats `4003` as "do not reconnect", so two GM browsers don't fight.
+- **The session owns the whole `WebSocketStream`** and drives reads, writes, pings and the end
+  signal in one `select!`. **Do not `split()` it.** It sends a protocol Ping every 20 s
+  (`FOUNDRY_SD_PING_SECS` overrides, for tests) and drops the companion when nothing — including the
+  browser's automatic Pongs — has arrived for `2 × interval + 5 s`. Browsers never ping, so this is
+  the only dead-peer detection.
+- `teardown` (connected→disconnected transition) fires `session_ended`, clears `tx` and `companion`,
+  and drains `pending` so in-flight callers fail immediately instead of waiting out the timeout.
+- `listen_changed` is a separate Notify so the PI status line follows bind/unbind without a repaint.
+- `system_did_wake_up` still notifies `config_changed`: that closes and rebinds, and the browser
+  reconnects within its backoff.
 
 ### Settings
 
-**`clientId` is optional.** A scoped relay key carries its own `scopedClientId`, and the relay
-resolves it when the field is blank — so `is_complete()` requires only URL and key, and a blank
-clientId is omitted from *both* the connect URL and the auth frame. The resolved value comes back in
-the `connected` frame and is surfaced in the inspector.
+**Config is `bind`, `port`, `token`** (plus the appearance fields). `is_complete()` is "token set";
+without one the plugin does not listen and the PI says so. Global settings saved by pre-1.0 versions
+(`relayUrl`/`apiKey`/`clientId`) still deserialize — unknown keys are ignored, container-level
+`#[serde(default)]` fills the rest — so an upgrade just shows "no token: generate one and save".
 
 **OpenDeck does not echo a plugin's own `setGlobalSettings` back to the plugin.** It writes the
 file and sends `didReceiveGlobalSettings` to the *property inspectors* only
@@ -360,34 +346,26 @@ appear and do nothing. Connection fields live in the sheet action's property ins
 **The sheet action never calls `set_settings`.** Only the PI writes settings, which makes the
 `did_receive_settings` -> `setSettings` feedback loop structurally impossible.
 
-**The API key is never echoed to the PI** (`hasApiKey: bool` instead), an empty incoming `apiKey`
-means "leave unchanged", and `Config`'s `Debug` is hand-written to redact.
+**The token *is* echoed to the PI**, unlike the old relay API key: the user has to copy it into
+Foundry, it only guards a loopback socket, and the PI itself is served from OpenDeck's localhost
+webserver. The PI generates it with `crypto.getRandomValues` (no Rust dependency), shows it in a
+password field with Show/Copy, and an empty incoming `token` means "leave unchanged". `Config`'s
+`Debug` is still hand-written to redact it from logs.
 
 ### Offline repaint
 
-`Relay::teardown` fires `session_ended` only on a connected→disconnected transition, and `main.rs`
+`Server::teardown` fires `session_ended` only on a connected→disconnected transition, and `main.rs`
 repaints both actions and refreshes PIs on it. Without that, the `offline` variants were only shown
 on the next unrelated repaint.
 
 ### Repaint refetches missing art
 
 `repaint_visible` calls `refetch_if_missing` for every instance, which spawns `ensure_art` when the
-relay is up and the cache has no entry. `ensure_art` is otherwise only reached from `will_appear` /
+companion is connected and the cache has no entry. `ensure_art` is otherwise only reached from `will_appear` /
 `did_receive_settings` / `refreshArt`, so before this a cleared cache (session start, border colour
 change) or a TTL-expired entry left the button on its manifest default until it was re-placed. Only
 the repaint path spawns — `ensure_art`'s own trailing `paint` never does — so a failing fetch can't
 loop; it just retries on the next repaint.
-
-### Relay write race (fixed in the relay fork)
-
-The relay wrote to each `/ws/api` connection from several goroutines with no lock: request-response
-goroutines, the hook-event fanout running on the Foundry read pump, and interactive-session frames.
-gorilla/websocket panics on concurrent writes, and in a response goroutine nothing recovers it, so
-the **relay process** died. The trigger was pressing a condition on several tokens: the
-`toggleCondition` result and a burst of `hooks` firehose events arrive together. Symptom here:
-every button fell back to its default icon (reconnect → cache clear, before the refetch above).
-Fixed in `foundryvtt-rest-api-relay/go-relay/internal/ws/client_api.go` (`writeAPIConn`, a
-per-connection mutex), with `client_api_write_test.go` reproducing the panic under `-race`.
 
 ### One manifest state, not two
 
@@ -405,37 +383,37 @@ path on a headless box for the sake of ~25 duplicated lines.
 ## Testing
 
 Zero-dependency Node harnesses in the scratchpad, none committed (they would be the only JS in
-a Rust repo):
+a Rust repo). Node 24's built-in `WebSocket` client plays the companion; the mock OpenDeck host is
+still hand-rolled RFC 6455 server framing (Node has no WS server).
 
 | Harness | Covers |
 |---|---|
-| `mock-host.mjs` | The counter transcript. Ignores `getGlobalSettings`/`setGlobalSettings` so plugin-level frames don't shift its sequential assertions. |
-| `sheet-test.mjs` | Mock OpenDeck **and** mock relay: auth, art fetch, toggle both ways, cache, PI round trips, ping/pong. Predates push; its polling assertions are stale. |
-| `sheet-failures.mjs` | Disconnect and reconnect. Predates push and the `streamdeck` request type; stale. |
-| `harness.mjs` | Shared RFC 6455 server/frame helpers imported by the two below. |
-| `push-test.mjs` | `subscribe` `hooks` right after auth, exactly one `streamdeck` request (sync) per session, snapshot paints, pushed `sheet` repaints, firehose/duplicate events ignored, **zero requests over a 15 s idle**, empty snapshot closes all, toggle still works, art refetched after reconnect, unanswered sync → companion missing after 5 s, PI shows `companion: null`, a press then alerts after one 5 s probe, a `snapshot` event with `version` restores it, an unpatched relay logs the fork-patch error, and **no `execute-js` frame is ever sent**. Also checks the legacy `.sheet` hook name is ignored. |
-| `condition-test.mjs` | Condition action: `Pick condition` title, `none` with no selection and a press that alerts without toggling, on/off/mixed from pushed selections, implied status shows on, unchanged selection doesn't repaint, press sends `toggleCondition` and does **not** repaint by itself, Foundry-side error alerts, `getConditions` PI round trip, shared connection state, relay drop repaints `offline`, art cached per condition. |
-| `initiative-test.mjs` | Initiative action: dim swords + alert with no request when nothing is selected, `Start (N)`, press sends `startCombat()` without repainting, combat push fetches the combatant's art and titles `Name\nR1`, press toggles their sheet (open border), a pushed sheet close repaints it, turn change, unstarted combat drops the round, `Empty` combat alerts, relay drop → offline, art fetched once. |
-| `module-unit.mjs` | The companion module's `main.mjs` imported under stubbed `Hooks`/`game`/`canvas`/`CONFIG`/`Combat`/`TokenDocument`: condition filtering, selection dedupe, change-only emits, tri-state toggle, `startCombat` call order and refusals, `turns[0]` fallback, combat change-only emit and `null` on delete, `streamdeck` handler registration on `ready`/`relayConnected`, dispatch envelope (result vs top-level error, requestId echo), `toggleSheet` open/close/refused, snapshot event `version`, folder paths and ordering for `actors`/`macros`, `executeMacro` permission/not-a-macro refusals, replying without awaiting a hung script, async script failure to `Hooks.onError`. |
-| `macro-test.mjs` | Macro action: `Pick macro`, saved name before art, `showTitle:false`, press → `executeMacro` + `showOk`, domain error alerts, `getMacros` carries folders, sheet `getActors` comes from the companion (no `search` frame), `refreshArt`, offline repaint, art cleared and refetched per session. |
+| `harness.mjs` | RFC 6455 server/frame helpers, a raw-TCP WS client (for the "never pongs" case), `waitFor`/`expectNone`. |
+| `e2e.mjs` | Spawns the release binary under a mock host with `FOUNDRY_SD_PING_SECS=1`: listens on the configured port; PI `connection` state (listening/url/token echoed); bad token → `4002`, non-hello / no hello → `4001`; good hello → `connected` with the plugin version, PI shows the companion version before the snapshot reply, exactly one `snapshot` request, `actorArt` fetch and open-variant paint; pushed `sheet` close repaints, duplicate doesn't; press → `toggleSheet` with `requestId` echoed, top-level `error` alerts; second companion → first gets `4003`, same world keeps art; close → offline paint; new world refetches art; `setConnection` port change → `1001`, old port closed, new one accepts; silent raw companion dropped after ~8 s; token change rejects the old token and accepts the new. |
+| `module-unit.mjs` | `main.mjs` under stubbed `Hooks`/`game.settings`/`foundry.utils.debounce`/`ui.notifications`/`canvas` and a fake `WebSocket` class: three client settings; no socket without a token; hello shape; no events before `connected`; snapshot + forced selection/combat after it; sheet close pushed once; `request` → `result` (result / unknown action / throw / domain error); `1006` reconnects after backoff and resyncs; `4003` and `4002` don't reconnect, `4002` notifies once permanently; URL/token changes reconnect; disabling closes. |
+
+**PI state is eventually consistent, not ordered.** A `connection` push generated before the listener
+bound (e.g. from `did_receive_global_settings`) can land after a later `getConnection` reply; the
+`listen_changed` push corrects it. The harness therefore polls `getConnection` until the expected
+state appears rather than asserting on the first frame.
 
 Assertions compare **parsed, key-sorted** objects — `set_settings`/`set_image` serialize through
 maps, so key order is alphabetical rather than declaration order.
 
 Two harness lessons worth keeping: waits must **filter by frame kind**, because art fetches and
-toggles interleave `streamdeck` request frames into the relay inbox and a naive "next frame" consumes the
-wrong one; and the mock relay must stay **self-consistent** — its snapshot, art `isOpen` and toggle
-answers must agree, or a later answer legitimately contradicts an earlier one.
+toggles interleave `request` frames into the companion inbox and a naive "next frame" consumes the
+wrong one; and the mock companion must stay **self-consistent** — its snapshot, art `isOpen` and
+toggle answers must agree, or a later answer legitimately contradicts an earlier one.
 
 ## The condition action
 
 Each button is bound to one status id (`statusId`, plus `statusName` cached for painting before art
 arrives). The list, toggling and artwork all live in the companion module's API; see its `CLAUDE.md`
-for the Foundry side (tri-state rule, implied statuses, why exhaustion is excluded).
+for the Foundry side (tri-state rule, implied statuses, why exhaustion is excluded and surprised included).
 
 - **Selection is pushed, never queried.** The companion's `{event:"selection", count, statuses}`
   replaces `ConditionState.selection` wholesale; `resync` seeds it from `snapshot().selection` and
-  resets it to empty when the companion is missing. Unchanged selections don't repaint.
+  resets it to empty when a snapshot carries no selection. Unchanged selections don't repaint.
 - **`key_up` never repaints.** It sends `toggleCondition` and only acts on an error (alert). The
   effect hooks in Foundry produce a `selection` event, and that is what repaints — so the button can
   never show a state Foundry didn't actually reach. It also alerts locally, without a round trip,
@@ -444,7 +422,7 @@ for the Foundry side (tri-state rule, implied statuses, why exhaustion is exclud
 
   | Condition | Variant |
   |---|---|
-  | relay down | `offline` |
+  | companion disconnected | `offline` |
   | `count == 0` | `none` |
   | `statuses[id]` absent/0 | `off` |
   | `statuses[id] >= count` | `on` |
@@ -500,7 +478,7 @@ start/end tasks and the global-settings handler take one argument:
 
 Stateless apart from art: nothing is pushed, so it takes no part in `event_loop` or `resync`.
 
-- `key_up` gates on `companion_ready` like the sheet action, sends `executeMacro`, and answers with
+- `key_up` gates on `is_connected()` like the sheet action, sends `executeMacro`, and answers with
   `show_ok` / `show_alert`. The companion replies once the macro has *started* (see its
   `CLAUDE.md`), so OK does not mean the script succeeded.
 - Art is `TtlCache<String, MacroArt>` keyed by trimmed UUID, two variants (`ready`, `offline`), no
@@ -512,4 +490,4 @@ Stateless apart from art: nothing is pushed, so it takes no part in `event_loop`
 The sheet and macro PIs fill their `<select>` from the companion's `actors` / `macros`, whose
 entries carry a `folder` path; `fillGrouped` (duplicated in both PIs, per the no-shared-PI-code rule)
 makes one `<optgroup>` per path. `foundry::list_reply` builds the `{event, status, <key>: list}`
-reply for these and for `getConditions`. The REST module's `search` request is no longer used.
+reply for these and for `getConditions`.
